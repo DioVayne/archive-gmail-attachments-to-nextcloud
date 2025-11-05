@@ -1,0 +1,143 @@
+/**
+ * ===================================================================================
+ * STORAGE PROVIDER: Nextcloud
+ * ===================================================================================
+ * Bevat alle logica die specifiek is voor interactie met Nextcloud via WebDAV en OCS.
+ */
+
+/**
+ * Het 'provider'-object dat de `Main.gs` logica verwacht.
+ * Het bundelt de standaardfuncties.
+ */
+const NextcloudProvider = {
+  /**
+   * Slaat de gevoelige Nextcloud credentials op in PropertiesService.
+   * Geroepen door `setupCredentials()` in Main.gs.
+   */
+  initialize: function() {
+    const props = PropertiesService.getScriptProperties();
+    props.setProperties({
+      'NEXTCLOUD_USER': USER_CONFIG_SENSITIVE.NEXTCLOUD_USER,
+      'NEXTCLOUD_APP_PASSWORD': USER_CONFIG_SENSITIVE.NEXTCLOUD_APP_PASSWORD
+    });
+  },
+
+  /**
+   * Uploadt een bestand naar Nextcloud via WebDAV.
+   * @param {string} fileName De unieke bestandsnaam.
+   * @param {GmailApp.Attachment} blob Het bestand-blob.
+   * @param {object} info Extra info (ongebruikt door Nextcloud, maar vereist).
+   * @returns {string} De WebDAV URL van het geüploade bestand.
+   */
+  uploadFile: function(fileName, blob, info) {
+    const filePath = `${CONFIG.ROOT_PATH}/${fileName}`;
+    const url = nextcloud_webdavUrl_(filePath);
+    
+    const resp = UrlFetchApp.fetch(url, {
+      method: 'put',
+      headers: nextcloud_basicAuthHeader_(),
+      payload: blob.getBytes(),
+      contentType: blob.getContentType() || 'application/octet-stream',
+      muteHttpExceptions: true
+    });
+    
+    const code = resp.getResponseCode();
+    if (code < 200 || code >= 300) {
+      throw new Error(`Nextcloud Upload failed: ${code} ${resp.getContentText()}`);
+    }
+    return url; // Retourneert de WebDAV URL
+  },
+
+  /**
+   * Maakt een (publieke) deellink aan via de Nextcloud OCS API.
+   * @param {string} fileName De bestandsnaam.
+   * @param {string} uploadResult De WebDAV URL (ongebruikt, pad wordt herberekend).
+   * @returns {string} De directe downloadlink.
+   */
+  createShareLink: function(fileName, uploadResult) {
+    if (!CONFIG.USE_PUBLIC_LINKS) {
+      return this.createUiLink(fileName, uploadResult);
+    }
+    
+    const filePath = `${CONFIG.ROOT_PATH}/${fileName}`;
+    const fullPath = '/' + filePath.replace(/^\//, '');
+    // FIX V3.1: Gebruik de "platte" CONFIG property
+    const url = CONFIG.BASE_URL + '/ocs/v2.php/apps/files_sharing/api/v1/shares';
+    const payload = { path: fullPath, shareType: '3', permissions: '1' }; // 3 = publiek, 1 = lezen
+
+    if (CONFIG.PUBLIC_LINK_EXPIRE_DAYS > 0) {
+      const until = new Date(Date.now() + CONFIG.PUBLIC_LINK_EXPIRE_DAYS * 86400 * 1000);
+      payload.expireDate = Utilities.formatDate(until, 'UTC', 'yyyy-MM-dd');
+    }
+    if (CONFIG.PUBLIC_LINK_PASSWORD) {
+      payload.password = CONFIG.PUBLIC_LINK_PASSWORD;
+    }
+
+    const headers = Object.assign(nextcloud_basicAuthHeader_(), { 'OCS-APIRequest': 'true', 'Accept': 'application/json' });
+    const resp = UrlFetchApp.fetch(url, { method: 'post', headers: headers, payload: payload, muteHttpExceptions: true });
+    const code = resp.getResponseCode();
+    const respText = resp.getContentText();
+    if (code < 200 || code >= 300) throw new Error(`Nextcloud OCS share failed: ${code} ${respText}`);
+
+    try {
+      const data = JSON.parse(respText);
+      if (data && data.ocs && data.ocs.data && data.ocs.data.url) {
+        const shareUrl = data.ocs.data.url;
+        return shareUrl.endsWith('/') ? shareUrl + 'download' : shareUrl + '';
+      }
+    } catch (e) {
+      Logger.log('Error parsing OCS JSON response: %s', e.message);
+      Logger.log('Response was: %s', respText);
+    }
+    throw new Error('OCS share succeeded, but could not find URL in JSON response.');
+  },
+
+  /**
+   * Maakt een fallback-link naar de Nextcloud UI.
+   * @param {string} fileName De bestandsnaam.
+   * @returns {string} De volledige UI URL.
+   */
+  createUiLink: function(fileName) {
+    const dirParam = encodeURIComponent('/' + CONFIG.ROOT_PATH.replace(/^\//, ''));
+    const fileParam = encodeURIComponent(fileName);
+    // FIX V3.1: Gebruik de "platte" CONFIG property
+    return `${CONFIG.BASE_URL}/index.php/apps/files/?dir=${dirParam}&openfile=${fileParam}`;
+  }
+};
+
+
+// ===================================================================================
+// PRIVATE HELPER FUNCTIONS (Nextcloud)
+// ===================================================================================
+
+/**
+ * Bouwt de volledige WebDAV URL.
+ * @param {string} path Het bestandspad.
+ * @returns {string} De volledige WebDAV URL.
+ * @private
+ */
+function nextcloud_webdavUrl_(path) {
+  const clean = path.replace(/^\/*/, '');
+  // Bouw pad-segmenten correct
+  const encodedPath = clean.split('/').map(encodeURIComponent).join('/');
+  // FIX V3.1: Gebruik de "platte" CONFIG property
+  return CONFIG.BASE_WEBDAV + '/' + encodedPath;
+}
+
+/**
+ * Creëert de 'Basic Auth' header uit PropertiesService.
+ * @returns {object} Het Authorization header object.
+ * @private
+ */
+function nextcloud_basicAuthHeader_() {
+  const props = PropertiesService.getScriptProperties();
+  const user = props.getProperty('NEXTCLOUD_USER');
+  const password = props.getProperty('NEXTCLOUD_APP_PASSWORD');
+  
+  if (!user || !password) {
+    throw new Error('Nextcloud credentials not found in PropertiesService. Run setupCredentials() first.');
+  }
+  
+  const token = Utilities.base64Encode(user + ':' + password);
+  return { 'Authorization': 'Basic ' + token };
+}

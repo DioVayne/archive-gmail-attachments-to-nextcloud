@@ -1,0 +1,79 @@
+/**
+ * ===================================================================================
+ * STORAGE PROVIDER: Google Drive
+ * ===================================================================================
+ * Bevat alle logica die specifiek is voor interactie met Google Drive.
+ * Dit is een voorbeeld van hoe makkelijk een nieuwe provider kan worden toegevoegd.
+ */
+
+/**
+ * Het 'provider'-object dat de `Main.gs` logica verwacht.
+ */
+const GoogleDriveProvider = {
+  /**
+   * Slaat credentials op. Voor Google Drive is dit niet nodig,
+   * omdat authenticatie automatisch gaat via de 'scopes' van het script.
+   */
+  initialize: function() {
+    Logger.log('Google Drive provider selected. No credentials need to be stored.');
+    // Controleer of de map bestaat
+    try {
+      DriveApp.getFolderById(CONFIG.ROOT_FOLDER_ID);
+    } catch (e) {
+      throw new Error(`Google Drive map met ID "${CONFIG.ROOT_FOLDER_ID}" niet gevonden. Controleer Config.gs.`);
+    }
+  },
+
+  /**
+   * Uploadt een bestand naar de gespecificeerde Google Drive map.
+   * @param {string} fileName De unieke bestandsnaam.
+   * @param {GmailApp.Attachment} blob Het bestand-blob.
+   * @param {object} info Extra info (ongebruikt).
+   * @returns {string} De Bestands-ID (File ID) van het nieuwe bestand.
+   */
+  uploadFile: function(fileName, blob, info) {
+    try {
+      const folder = DriveApp.getFolderById(CONFIG.ROOT_FOLDER_ID);
+      const file = folder.createFile(blob); // Upload het bestand
+      file.setName(fileName); // Hernoem het naar onze unieke naam
+      return file.getId(); // Retourneer de ID
+    } catch (e) {
+      throw new Error(`Google Drive Upload failed: ${e.message}`);
+    }
+  },
+
+  /**
+   * Maakt een 'iedereen met de link' deellink aan.
+   * @param {string} fileName De bestandsnaam (ongebruikt, we hebben de ID nodig).
+   * @param {string} uploadResult De Bestands-ID (File ID) van de uploadFile stap.
+   * @returns {string} De directe downloadlink.
+   */
+  createShareLink: function(fileName, uploadResult) {
+    try {
+      const fileId = uploadResult; // Dit is de File ID
+      const file = DriveApp.getFileById(fileId);
+      file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+      
+      // We willen een *directe download* link, niet de viewer.
+      // Formaat: https://drive.google.com/uc?export=download&id=FILE_ID
+      return `https://drive.google.com/uc?export=download&id=${fileId}`;
+    } catch (e) {
+      throw new Error(`Google Drive share link failed: ${e.message}`);
+    }
+  },
+
+  /**
+   * Maakt een fallback-link naar de Google Drive UI.
+   * @param {string} fileName De bestandsnaam (ongebruikt).
+   * @param {string} uploadResult De Bestands-ID (File ID).
+   * @returns {string} De volledige UI URL.
+   */
+  createUiLink: function(fileName, uploadResult) {
+    const fileId = uploadResult;
+    try {
+      return DriveApp.getFileById(fileId).getUrl();
+    } catch (e) {
+      return `https://drive.google.com/drive/files/${fileId}`; // Fallback
+    }
+  }
+};
