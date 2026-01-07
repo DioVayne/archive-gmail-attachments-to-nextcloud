@@ -2,7 +2,7 @@
 
 > **Reclaim Gmail space by automatically archiving large email attachments to Nextcloud or Google Drive**
 
-[![Version](https://img.shields.io/badge/version-4.9-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-4.9.1-blue.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Google Apps Script](https://img.shields.io/badge/platform-Google%20Apps%20Script-yellow.svg)](https://script.google.com)
 
@@ -343,16 +343,7 @@ resetStuckProcessingLabels()
 
 Removes processing label from all threads so they can be retried.
 
-### Mark Archived Digests as Read
-
-If you have many unread digests cluttering your archive:
-
-```javascript
-// Run this from the script editor:
-markArchivedDigestsAsRead()
-```
-
-Marks all archived digest threads as read (preserves inbox items).
+**Note:** Digest emails are automatically marked as read when archived (no manual action needed).
 
 ### Test Your Configuration
 

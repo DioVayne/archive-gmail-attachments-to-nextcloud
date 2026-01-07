@@ -1,22 +1,33 @@
 /**
  * ===================================================================================
- * GMAIL ARCHIVER - MAIN SCRIPT (v4.8 - Optimized & English)
+ * GMAIL ARCHIVER - MAIN SCRIPT (v4.9 - Enhanced)
  * ===================================================================================
  * This file contains the *core logic* for Gmail, batching, and processing threads.
  *
- * Functions:
- * - runTest()
- * - runProduction()
- * - setupTriggerHourly()
- * - cleanupOrphanedDrafts()
- * - resetStuckProcessingLabels()
- * - markArchivedDigestsAsRead() (Mark archived digests as read)
- * - testQuery()
- * - testStorageProvider()
+ * === MAIN FUNCTIONS ===
+ * runTest()                       - ESSENTIAL: Safe testing on 1 labeled thread before production use
+ * runProduction()                 - ESSENTIAL: Main batch processor for archiving attachments
+ * setupTriggerHourly()            - RECOMMENDED: Sets up automatic hourly execution
+ *
+ * === RECOVERY UTILITIES ===
+ * cleanupOrphanedDrafts()         - ESSENTIAL: Removes stuck drafts after errors (prevents inbox clutter)
+ * resetStuckProcessingLabels()    - ESSENTIAL: Fixes threads stuck in "processing" after crashes
+ * emergencyRollback()             - CRITICAL: Restores archived threads from trash (30-day window)
+ *
+ * === TESTING & VALIDATION ===
+ * testQuery()                     - RECOMMENDED: Preview which threads will be processed (prevents mistakes)
+ * testStorageProvider()           - ESSENTIAL: Validates cloud storage config before first run
+ * validateConfiguration()         - RECOMMENDED: Catches 15+ config errors before they cause problems
+ *
+ * === OPTIONAL UTILITIES ===
+ * showMetrics()                   - RECOMMENDED: Displays performance statistics
+ * resetMetrics()                  - OPTIONAL: Clears all metrics for fresh start
+ *
+ * NOTE: Digest emails are automatically marked as read when archived.
  *
  * @see Config.gs (for all configuration)
- * @see Nextcloud_Connector.gs (for Nextcloud implementation)
- * @see GoogleDrive_Connector.gs (for Google Drive implementation)
+ * @see Nextcloud_Connector (for Nextcloud implementation)
+ * @see GoogleDrive_Connector (for Google Drive implementation)
  * ===================================================================================
  */
 
@@ -62,7 +73,18 @@ function classifyError_(e) {
 // ===================================================================================
 
 /**
- * Runs the script in TEST mode on a single thread.
+ * ESSENTIAL - Safe testing before production use.
+ *
+ * WHY NEEDED:
+ * - Processing email is DESTRUCTIVE (original threads are deleted)
+ * - Testing on 1 thread lets you verify: digest format, file uploads, labels
+ * - Prevents accidentally archiving thousands of threads with wrong config
+ *
+ * HOW TO USE:
+ * 1. Manually apply label "test-gmail-cleanup" to 1-2 test threads
+ * 2. Run this function from Apps Script editor
+ * 3. Check results before enabling runProduction()
+ *
  * Searches for `CONFIG.TEST_MODE_LABEL` and processes the first thread it finds.
  */
 function runTest() {
@@ -133,7 +155,26 @@ function runTest() {
 
 
 /**
- * Runs the script in PRODUCTION mode.
+ * ESSENTIAL - Main production batch processor.
+ *
+ * WHY NEEDED:
+ * - This is THE core function that archives your Gmail attachments
+ * - Handles batching (processes max N threads then schedules continuation)
+ * - Includes all safety mechanisms: rate limit handling, error recovery, metrics
+ *
+ * SAFETY FEATURES:
+ * - Refuses to run if TEST_MODE is still enabled
+ * - Respects PROCESSING_HOURS window (if configured)
+ * - Auto-schedules continuation if more work remains
+ * - Sends progress emails (if enabled)
+ * - Tracks comprehensive metrics
+ *
+ * HOW IT WORKS:
+ * 1. Searches Gmail for threads matching criteria
+ * 2. Processes up to MAX_THREADS_PER_RUN threads
+ * 3. If more work remains, schedules itself to run again in 5 minutes
+ * 4. Stops before 6-minute Apps Script timeout
+ *
  * Processes threads in batches based on `GMAIL_QUERY_BASE`.
  */
 function runProduction() {
@@ -346,9 +387,6 @@ function getStorageProvider_() {
  */
 function processThreadAndCreateNewDigest_(thread, me, storage) {
   Logger.log('--- THREAD start --- id=%s subject="%s"', thread.getId(), thread.getFirstMessageSubject());
-
-  // Check if the original thread is unread
-  const isOriginalUnread = thread.isUnread();
 
   const messages = thread.getMessages();
 
@@ -611,13 +649,9 @@ function processThreadAndCreateNewDigest_(thread, me, storage) {
 
       newDigestThread.moveToArchive();
 
-      // Apply read status (match original)
-      if (!isOriginalUnread) {
-        newDigestThread.markRead();
-        Logger.log('   New digest thread marked as read (matching original).');
-      } else {
-        Logger.log('   New digest thread left unread (matching original).');
-      }
+      // Always mark digests as read (archived = cleaned up = read)
+      newDigestThread.markRead();
+      Logger.log('   New digest thread marked as read (archived digests are always read).');
 
       Logger.log('   New digest thread successfully archived.');
     } else {
@@ -1033,8 +1067,29 @@ function deleteContinuationTriggers_(handlerFunction) {
 
 
 /**
- * Sets up the main trigger (every hour) for `runProduction`.
- * Run this function once from the editor.
+ * RECOMMENDED - Sets up automatic hourly execution.
+ *
+ * WHY NEEDED (vs continuation triggers):
+ * - runProduction() creates ONE-TIME continuation triggers (5 min later) to finish current backlog
+ * - These continuation triggers STOP when all work is done
+ * - WITHOUT hourly trigger: script won't start again when NEW emails arrive later
+ * - WITH hourly trigger: script checks every hour for new work (emails from today/tomorrow/etc.)
+ *
+ * TWO TRIGGER TYPES EXPLAINED:
+ * - Continuation triggers = "Finish current batch" (auto-created by runProduction, temporary)
+ * - Hourly trigger = "Keep checking for new emails forever" (created by this function, permanent)
+ *
+ * WHAT IT DOES:
+ * - Deletes any existing hourly triggers (prevents duplicates)
+ * - Deletes active batch continuation triggers (clean slate)
+ * - Creates new trigger that runs runProduction() every hour
+ *
+ * WHEN TO USE:
+ * - After successful testing with runTest()
+ * - When you want "set it and forget it" automation
+ * - For continuous monitoring of incoming emails with large attachments
+ *
+ * NOTE: You can disable this anytime via: Edit → Current project's triggers
  */
 function setupTriggerHourly() {
   deleteContinuationTriggers_('runProduction'); // Remove active batch triggers
@@ -1059,9 +1114,24 @@ function setupTriggerHourly() {
 // ===================================================================================
 
 /**
- * Utility to safely clean up "orphaned" drafts created by this script.
+ * ESSENTIAL - Removes stuck drafts after errors.
+ *
+ * WHY NEEDED:
+ * - Script creates drafts to build digest emails
+ * - If error occurs AFTER draft creation but BEFORE sending, draft is orphaned
+ * - Without cleanup, you can end up with hundreds of unsent drafts cluttering inbox
+ *
+ * WHEN TO USE:
+ * - After a crash or error during digest creation
+ * - If you see many "[ARCHIVED-DIGEST]" drafts in your Gmail drafts folder
+ * - Recommended to run after fixing any major errors
+ *
+ * SAFETY:
+ * - ONLY deletes drafts whose subject starts with DIGEST_SUBJECT_PREFIX
+ * - Won't touch your personal drafts
+ * - Safe to run multiple times
+ *
  * This ONLY deletes drafts whose subject starts with your DIGEST_SUBJECT_PREFIX.
- * Use this if you accidentally have hundreds of drafts after an error.
  */
 function cleanupOrphanedDrafts() {
   const prefix = CONFIG.DIGEST_SUBJECT_PREFIX;
@@ -1093,8 +1163,29 @@ function cleanupOrphanedDrafts() {
 // ===================================================================================
 
 /**
+ * ESSENTIAL - Fixes threads stuck in "processing" after crashes.
+ *
+ * WHY NEEDED:
+ * - Script marks threads with "Processing-Attachment" label while working on them
+ * - If script crashes mid-execution, threads stay marked as "processing" forever
+ * - These "stuck" threads are EXCLUDED from future runs (script skips them)
+ * - Without this tool, stuck threads will NEVER be processed
+ *
+ * SYMPTOMS OF STUCK THREADS:
+ * - You see threads with "Processing-Attachment" label that haven't been archived
+ * - Script runs but doesn't find any work (because threads are excluded)
+ * - Number of threads to process doesn't decrease
+ *
+ * WHEN TO USE:
+ * - After any script crash or timeout error
+ * - If you manually stopped execution mid-run
+ * - If threads appear stuck in limbo
+ *
+ * WHAT IT DOES:
+ * - Removes "Processing-Attachment" label from ALL threads (batches of 100)
+ * - Threads become eligible for processing again on next run
+ *
  * Removes the 'Processing-Attachment' label from ALL threads.
- * Use this if threads are 'stuck' due to a crash/interruption.
  */
 function resetStuckProcessingLabels() {
   Logger.log('--- resetStuckProcessingLabels START ---');
@@ -1126,40 +1217,6 @@ function resetStuckProcessingLabels() {
 
   Logger.log('--- DONE. %s threads repaired (label "%s" removed). ---', count, processingLabelName);
 }
-
-// ===================================================================================
-// READ STATUS FIX TOOL
-// ===================================================================================
-
-/**
- * Marks all [ARCHIVED-DIGEST] threads as read, except those in the inbox.
- * Use this if your archive is full of unread digests.
- */
-function markArchivedDigestsAsRead() {
-  Logger.log('--- markArchivedDigestsAsRead START ---');
-
-  const query = `subject:("${CONFIG.DIGEST_SUBJECT_PREFIX}") is:unread -in:inbox`;
-  Logger.log('Searching for threads with query: %s', query);
-
-  // Process in batches of 100
-  let threads = GmailApp.search(query, 0, 100);
-  let totalProcessed = 0;
-
-  while (threads.length > 0) {
-    Logger.log('Batch of %s threads found. Marking as read...', threads.length);
-    GmailApp.markThreadsRead(threads);
-    totalProcessed += threads.length;
-
-    // Short pause
-    Utilities.sleep(1000);
-
-    // Find the next batch (the previous ones are now read, so they won't be found)
-    threads = GmailApp.search(query, 0, 100);
-  }
-
-  Logger.log('--- DONE. Total %s archived digest threads marked as read. ---', totalProcessed);
-}
-
 
 // ===================================================================================
 // CONFIGURATION VALIDATOR
@@ -1489,6 +1546,30 @@ function doGet() {
 // ===================================================================================
 
 /**
+ * RECOMMENDED - Preview which threads will be processed (prevents mistakes).
+ *
+ * WHY NEEDED:
+ * - Gmail queries can be tricky (syntax errors, unexpected results)
+ * - Running production without testing query can archive WRONG threads
+ * - This shows you EXACTLY what will be processed before you commit
+ *
+ * PREVENTS DISASTERS LIKE:
+ * - Archiving all emails instead of just old ones (missing date filter)
+ * - Processing emails without attachments (syntax error)
+ * - Missing size filter (processing tiny files)
+ * - Including important threads you wanted to keep
+ *
+ * WHEN TO USE:
+ * - Before first production run
+ * - After changing GMAIL_QUERY_BASE in Config.gs
+ * - If you're unsure what threads match your criteria
+ * - When testing TEST_MODE vs PRODUCTION mode queries
+ *
+ * WHAT IT SHOWS:
+ * - Exact query that will be used
+ * - First 20 matching threads (ID, subject, message count, labels)
+ * - Lets you verify BEFORE deletion
+ *
  * Tests the Gmail query that will be used by runTest or runProduction.
  * Logs the first 20 threads found.
  */
@@ -1521,6 +1602,33 @@ function testQuery() {
 }
 
 /**
+ * ESSENTIAL - Validates cloud storage config before first run.
+ *
+ * WHY NEEDED:
+ * - Cloud storage config errors only show up when uploading files
+ * - Running production with bad config = processing threads but LOSING files
+ * - This catches config errors BEFORE you start archiving real emails
+ *
+ * CATCHES CRITICAL ERRORS LIKE:
+ * - Wrong Nextcloud credentials (401 Unauthorized)
+ * - Invalid WebDAV path (404 Not Found)
+ * - Wrong Google Drive folder ID
+ * - Network/firewall issues
+ * - Quota/storage space problems
+ * - Share link creation failures
+ *
+ * WHEN TO USE:
+ * - BEFORE first production run (mandatory!)
+ * - After changing storage provider settings
+ * - After switching from Nextcloud to Google Drive (or vice versa)
+ * - If you suspect cloud storage issues
+ *
+ * WHAT IT TESTS:
+ * 1. File upload (creates test file with timestamp)
+ * 2. Share link creation (public download link)
+ * 3. UI link creation (fallback link)
+ * - If all 3 succeed, your config is correct
+ *
  * Tests the configured storage provider by uploading a test file
  * and creating share/UI links.
  */

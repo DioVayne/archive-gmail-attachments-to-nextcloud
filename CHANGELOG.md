@@ -2,6 +2,39 @@
 
 All notable changes to the Gmail Attachment Archiver project are documented in this file.
 
+## [v4.9.1] - 2026-01-07 - Code Quality & Clarity Release
+
+### 🧹 Simplifications & Improvements
+
+#### Automatic Read Status for Digests
+- **Changed**: Digest emails are now ALWAYS marked as read when archived
+- **Removed**: `markArchivedDigestsAsRead()` utility function (no longer needed)
+- **Removed**: `isOriginalUnread` variable (no longer used)
+- **Rationale**: Archived digests represent cleaned-up mail, so they should always be read
+- **Benefit**: One less utility function to maintain, cleaner code, better UX
+
+#### Enhanced Function Documentation
+- **Added**: Comprehensive "WHY NEEDED" explanations for all 8 main functions
+- **Clarified**: Difference between continuation triggers (temporary) vs hourly trigger (permanent)
+- **Improved**: Each function now has: purpose, when to use, what it does, safety notes
+- **Categories**: Functions organized by: Main, Recovery, Testing, Optional
+
+**Functions with new documentation:**
+- `runTest()` - Why testing is essential before production
+- `runProduction()` - Core function safety features explained
+- `setupTriggerHourly()` - Why hourly trigger is needed despite auto-continuation
+- `cleanupOrphanedDrafts()` - Why orphaned drafts happen and how to fix
+- `resetStuckProcessingLabels()` - Symptoms and recovery from stuck threads
+- `testQuery()` - Prevents disasters from query mistakes
+- `testStorageProvider()` - Catches config errors before data loss
+
+### 📝 Documentation Updates
+- Updated README.md to reflect automatic read status
+- Updated function header with clearer categorization
+- Added note about automatic read marking
+
+---
+
 ## [v4.9] - 2026-01-07 - Enhancement Release
 
 ### 🚀 Major New Features
