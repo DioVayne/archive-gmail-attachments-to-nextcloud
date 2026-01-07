@@ -1,41 +1,81 @@
 /**
  * ===================================================================================
- * GMAIL ARCHIVER - HOOFDSCRIPT (v3.0)
+ * GMAIL ARCHIVER - MAIN SCRIPT (v4.8 - Optimized & English)
  * ===================================================================================
- * Dit bestand bevat de *kernlogica* voor Gmail, batching, en het verwerken
- * van threads. Het is agnostisch over *waar* de bestanden worden opgeslagen.
+ * This file contains the *core logic* for Gmail, batching, and processing threads.
  *
- * Functies:
+ * Functions:
  * - runTest()
  * - runProduction()
  * - setupTriggerHourly()
+ * - cleanupOrphanedDrafts()
+ * - resetStuckProcessingLabels()
+ * - markArchivedDigestsAsRead() (Mark archived digests as read)
  * - testQuery()
- * - testStorageProvider() (vervangt testFlatPut)
+ * - testStorageProvider()
  *
- * @see Config.gs (voor alle configuratie)
- * @see Nextcloud_Connector.gs (voor Nextcloud implementatie)
- * @see GoogleDrive_Connector.gs (voor Google Drive implementatie)
+ * @see Config.gs (for all configuration)
+ * @see Nextcloud_Connector.gs (for Nextcloud implementation)
+ * @see GoogleDrive_Connector.gs (for Google Drive implementation)
  * ===================================================================================
  */
 
 // ===================================================================================
-// SCRIPT ENTRYPOINTS (Hoofdfuncties)
+// ERROR CLASSIFICATION SYSTEM
 // ===================================================================================
 
 /**
- * Draait het script in TEST modus op een enkele thread.
- * Zoekt naar `CONFIG.TEST_MODE_LABEL` en verwerkt de eerste thread die het vindt.
+ * Classifies errors into categories for appropriate handling.
+ * @param {Error} e The error object.
+ * @returns {string} Error type: 'RATE_LIMIT', 'QUOTA', 'PERMANENT', or 'TRANSIENT'.
+ * @private
+ */
+function classifyError_(e) {
+  const msg = e.message || '';
+
+  // Speed-based rate limiting (temporary)
+  if (msg.includes('User-rate limit exceeded')) {
+    return 'RATE_LIMIT';
+  }
+
+  // Daily quota exceeded (wait until next day)
+  if (msg.includes('Service invoked too many times')) {
+    return 'QUOTA';
+  }
+
+  // Permanent errors that won't fix themselves
+  if (msg.includes('Could not find new digest') ||
+      msg.includes('Upload failed') ||
+      msg.includes('share failed') ||
+      msg.includes('Email Body Size') ||
+      msg.includes('Argument too large: subject') ||
+      msg.includes('Cannot read properties of null')) {
+    return 'PERMANENT';
+  }
+
+  // Everything else is considered transient (retry next run)
+  return 'TRANSIENT';
+}
+
+// ===================================================================================
+// SCRIPT ENTRYPOINTS (Main Functions)
+// ===================================================================================
+
+/**
+ * Runs the script in TEST mode on a single thread.
+ * Searches for `CONFIG.TEST_MODE_LABEL` and processes the first thread it finds.
  */
 function runTest() {
-  Logger.log('runTest() start (Archiver v3.0)');
-  const storage = getStorageProvider_(); // Haal de actieve storage provider op
+  Logger.log('runTest() start (Archiver v4.8)');
+  const storage = getStorageProvider_();
+  if (!storage) return;
 
   // Get labels
   const testLabel = getOrCreateLabel_(CONFIG.TEST_MODE_LABEL);
   const processingLabel = getOrCreateLabel_(CONFIG.PROCESSING_LABEL);
   const skippedLabel = getOrCreateLabel_(CONFIG.PROCESSED_SKIPPED_LABEL);
   const errorLabel = getOrCreateLabel_(CONFIG.PROCESSED_ERROR_LABEL);
-  const processedLabel = getOrCreateLabel_(CONFIG.PROCESSED_LABEL);
+  const processedLabel = getOrCreateLabel_(CONFIG.PROCESSED_LABEL); // Ensure it exists
 
   // --- Build the Test Query ---
   const labelsQuery = `-label:${CONFIG.PROCESSED_LABEL} ` +
@@ -43,7 +83,7 @@ function runTest() {
                       `-label:${CONFIG.PROCESSED_SKIPPED_LABEL} ` +
                       `-label:${CONFIG.PROCESSED_ERROR_LABEL}`;
   const query = `label:${CONFIG.TEST_MODE_LABEL} ${labelsQuery}`;
-  
+
   Logger.log('--- !!! TEST MODE ACTIVE !!! ---');
   Logger.log('Searching for ONE thread with query: %s', query);
 
@@ -57,14 +97,14 @@ function runTest() {
   const me = Session.getActiveUser().getEmail();
 
   Logger.log('Found test thread: id=%s subject="%s"', thread.getId(), thread.getFirstMessageSubject());
-  
+
   // --- Process the single thread ---
   thread.addLabel(processingLabel);
   thread.removeLabel(testLabel);
 
   try {
     const success = processThreadAndCreateNewDigest_(thread, me, storage);
-    
+
     if (success) {
       Logger.log('   New digest created. Moving OLD thread %s to trash.', thread.getId());
       thread.moveToTrash();
@@ -87,29 +127,51 @@ function runTest() {
       Logger.log('Could not apply error label: %s', eLabel.message);
     }
   }
-  
+
   Logger.log('runTest() finished');
 }
 
 
 /**
- * Draait het script in PRODUCTIE modus.
- * Verwerkt threads in batches gebaseerd op `GMAIL_QUERY_BASE`.
+ * Runs the script in PRODUCTION mode.
+ * Processes threads in batches based on `GMAIL_QUERY_BASE`.
  */
 function runProduction() {
   const startTime = Date.now();
-  Logger.log('runProduction() start (Archiver v3.0)');
-  const storage = getStorageProvider_(); // Haal de actieve storage provider op
+  Logger.log('runProduction() start (Archiver v4.8)');
+
+  const storage = getStorageProvider_();
+  if (!storage) return;
 
   // SAFETY CHECK
   if (CONFIG.TEST_MODE) {
-    Logger.log('ERROR: `TEST_MODE` is still set to `true` in USER_CONFIG_GENERAL.');
+    Logger.log('ERROR: `TEST_MODE` is still set to `true` in Config.gs.');
     Logger.log('Please set `TEST_MODE: false` to run in production.');
     Logger.log('Or, select the `runTest()` function to test a single thread.');
     return;
   }
 
+  // SMART SCHEDULING CHECK
+  if (CONFIG.PROCESSING_HOURS) {
+    const currentHour = new Date().getHours();
+    if (currentHour < CONFIG.PROCESSING_HOURS.START || currentHour >= CONFIG.PROCESSING_HOURS.END) {
+      Logger.log('Outside processing window (%s:00 - %s:00). Skipping run.',
+        CONFIG.PROCESSING_HOURS.START, CONFIG.PROCESSING_HOURS.END);
+      return;
+    }
+  }
+
+  // PREVIEW MODE CHECK
+  if (CONFIG.PREVIEW_MODE) {
+    Logger.log('=== PREVIEW MODE ACTIVE ===');
+    Logger.log('Script will LOG actions but NOT upload/delete anything.');
+  }
+
   deleteContinuationTriggers_('runProduction'); // Triggers now point to this function
+
+  // Track batch
+  incrementMetric_('total_batches');
+  recordMetric_('last_run', new Date().toISOString());
 
   // --- Build the Gmail Query ---
   const labelsQuery = `-label:${CONFIG.PROCESSED_LABEL} ` +
@@ -132,10 +194,19 @@ function runProduction() {
   const processingLabel = getOrCreateLabel_(CONFIG.PROCESSING_LABEL);
   const skippedLabel = getOrCreateLabel_(CONFIG.PROCESSED_SKIPPED_LABEL);
   const errorLabel = getOrCreateLabel_(CONFIG.PROCESSED_ERROR_LABEL);
-  
+
   let needToContinue = false;
   let hitRateLimit = false;
   const me = Session.getActiveUser().getEmail();
+
+  // Batch statistics for progress notification
+  const batchStats = {
+    processed: 0,
+    skipped: 0,
+    errored: 0,
+    filesUploaded: 0,
+    bytesSaved: 0
+  };
 
   // Process each thread
   threads.forEach(thread => {
@@ -155,21 +226,29 @@ function runProduction() {
     
     try {
       const success = processThreadAndCreateNewDigest_(thread, me, storage);
-      
+
       if (success) {
-        // SUCCESS: Move the *old* thread to the trash and label *it*
+        // SUCCESS: Move the *old* thread to trash and label it
         Logger.log('   New digest created. Moving OLD thread %s to trash.', thread.getId());
         thread.moveToTrash();
         thread.removeLabel(processingLabel);
         thread.addLabel(processedLabel); // Apply to OLD thread
         Logger.log('   OLD thread %s successfully trashed and labeled.', thread.getId());
+
+        // Update metrics and batch stats
+        incrementMetric_('threads_processed');
+        batchStats.processed++;
       } else {
-        // SKIPPED: No relevant attachments were found
+        // SKIPPED: No relevant attachments found
         Logger.log('   Thread %s skipped (no attachments > %s), labeling as %s.', thread.getId(), humanSize_(CONFIG.SIZE_THRESHOLD_BYTES), CONFIG.PROCESSED_SKIPPED_LABEL);
         thread.removeLabel(processingLabel);
         thread.addLabel(skippedLabel);
+
+        // Update metrics and batch stats
+        incrementMetric_('threads_skipped');
+        batchStats.skipped++;
       }
-      
+
       Utilities.sleep(CONFIG.SLEEP_BETWEEN_THREADS_MS);
 
     } catch (e) {
@@ -177,111 +256,182 @@ function runProduction() {
       Logger.log('ERROR processing thread %s: %s', thread.getId(), e.message);
       Logger.log('Stack: %s', e.stack);
 
-      // --- FIX V3.1: Verbeterde Foutafhandeling ---
+      // Classify error and handle appropriately
+      const errorType = classifyError_(e);
 
-      // VANG DAGELIJKSE QUOTA-FOUT OP (e-mail verzenden)
-      if (e.message && e.message.includes('Service invoked too many times')) {
-        Logger.log('   Gmail DAG QUOTA (email) bereikt. Stoppen van deze batch.');
-        Logger.log('   Thread *blijft* "Processing" om morgen opnieuw te proberen.');
-        hitRateLimit = true; // Stop deze batch
-        needToContinue = true; // Plan een nieuwe batch (voor later)
-        // BELANGRIJK: Verwijder het processingLabel NIET.
-      
-      } else if (e.message && e.message.includes('User-rate limit exceeded')) { // SNELHEIDS-limiet
-        Logger.log('   Gmail "rate limit" (snelheid) gedetecteerd. Stoppen van deze batch.');
-        hitRateLimit = true;
-        needToContinue = true;
-        // BELANGRIJK: Verwijder het processingLabel NIET.
+      switch (errorType) {
+        case 'RATE_LIMIT':
+          Logger.log('   Gmail rate limit (speed) detected. Stopping this batch.');
+          hitRateLimit = true;
+          needToContinue = true;
+          // IMPORTANT: Do NOT remove processingLabel. Wait for limit to pass.
+          break;
 
-      } else if (e.message.includes('Could not find new digest') || 
-                 e.message.includes('Upload failed') ||
-                 e.message.includes('share failed')) // Algemene term voor opslagfouten
-      {
-        Logger.log('   This is a critical error. Labeling thread as %s.', CONFIG.PROCESSED_ERROR_LABEL);
-        thread.removeLabel(processingLabel);
-        thread.addLabel(errorLabel);
-      } else {
-        // Dit is een onbekende/tijdelijke fout. Reset de thread.
-        Logger.log('   Temporary/Unknown error. Resetting thread (removing processing label).');
-        thread.removeLabel(processingLabel);
+        case 'QUOTA':
+          Logger.log('   Gmail Daily Quota (100+ emails) detected. Stopping batch.');
+          Logger.log('   Thread will be retried when quota resets (tomorrow).');
+          hitRateLimit = true;
+          needToContinue = true;
+          // IMPORTANT: Do NOT remove processingLabel. Wait for quota to reset.
+          break;
+
+        case 'PERMANENT':
+          Logger.log('   This is a critical, non-recoverable error. Labeling thread as %s.', CONFIG.PROCESSED_ERROR_LABEL);
+          thread.removeLabel(processingLabel);
+          thread.addLabel(errorLabel);
+          incrementMetric_('threads_errored');
+          batchStats.errored++;
+          break;
+
+        case 'TRANSIENT':
+        default:
+          Logger.log('   Temporary/Unknown error. Resetting thread (removing processing label).');
+          thread.removeLabel(processingLabel);
+          break;
       }
-      // --- EINDE FIX V3.1 ---
     }
   });
   
   // --- HANDLE NEXT BATCH ---
-  if (needToContinue || (threads.length === CONFIG.MAX_THREADS_PER_RUN)) {
-    const waitMinutes = hitRateLimit ? 15 : 5;
+  // Check if there's more work to do by doing a lightweight query
+  const hasMoreWork = needToContinue || GmailApp.search(query, 0, 1).length > 0;
+
+  if (hasMoreWork) {
+    const waitMinutes = hitRateLimit ? 15 : 5; // Wait longer for rate limits
     Logger.log('More work to do, scheduling new trigger in %s minutes.', waitMinutes);
+    batchStats.nextRunMinutes = waitMinutes;
     createContinuationTrigger_('runProduction', waitMinutes);
   } else {
     Logger.log('Run complete, all items in this batch processed.');
+    batchStats.nextRunMinutes = 0;
+  }
+
+  // Send progress notification if enabled
+  if (CONFIG.SEND_PROGRESS_EMAILS && (batchStats.processed > 0 || batchStats.errored > 0)) {
+    sendProgressNotification_(batchStats);
   }
 
   Logger.log('runProduction() finished');
 }
 
 /**
- * Haalt de actieve storage provider op basis van de configuratie.
- * @returns {object} Het storage provider object (bv. NextcloudProvider).
+ * Gets the active storage provider based on configuration.
+ * @returns {object|null} The provider (e.g., NextcloudProvider) or null on error.
  * @private
  */
 function getStorageProvider_() {
-  switch (ACTIVE_STORAGE_PROVIDER) {
-    case 'Nextcloud':
-      return NextcloudProvider;
-    case 'GoogleDrive':
-      return GoogleDriveProvider;
-    default:
-      throw new Error(`Unknown ACTIVE_STORAGE_PROVIDER: "${ACTIVE_STORAGE_PROVIDER}". Check Config.gs.`);
+  try {
+    switch (ACTIVE_STORAGE_PROVIDER) {
+      case 'Nextcloud':
+        return NextcloudProvider;
+      case 'GoogleDrive':
+        return GoogleDriveProvider;
+      default:
+        throw new Error(`Unknown ACTIVE_STORAGE_PROVIDER: "${ACTIVE_STORAGE_PROVIDER}" in Config.gs`);
+    }
+  } catch (e) {
+    Logger.log(e.message);
+    return null;
   }
 }
 
 /**
- * Hoofdlogica: verzamelt bijlagen, bouwt een *nieuwe* mail,
- * en archiveert/labelt die nieuwe mail.
- * @param {GmailApp.Thread} thread De te verwerken Gmail-thread.
- * @param {string} me E-mailadres van de gebruiker.
- * @param {object} storage De actieve storage provider (bv. NextcloudProvider).
- * @returns {boolean} `true` bij succes, `false` indien overgeslagen.
+ * Main logic: collects attachments, builds a *new* email,
+ * and archives that new email. (Efficient, single-loop version).
+ * @param {GmailApp.Thread} thread The Gmail thread to process.
+ * @param {string} me The user's email address.
+ * @param {object} storage The active storage provider (e.g., NextcloudProvider).
+ * @returns {boolean} `true` on success, `false` if skipped.
  * @private
  */
 function processThreadAndCreateNewDigest_(thread, me, storage) {
   Logger.log('--- THREAD start --- id=%s subject="%s"', thread.getId(), thread.getFirstMessageSubject());
+
+  // Check if the original thread is unread
+  const isOriginalUnread = thread.isUnread();
+
   const messages = thread.getMessages();
-  
-  const allUploaded = [];     // Lijst van alle geüploade bestanden
-  const messagesToDigest = []; // Array om info vast te houden voor het bouwen van de digest
+
+  const allUploaded = [];     // List of all uploaded files
+  const messagesToDigest = []; // Array to store info for building the digest
   const threadLabels = thread.getLabels().map(l => l.getName()).filter(name => name !== CONFIG.PROCESSING_LABEL).sort();
+  const uploadedHashes = new Set(); // Thread-level deduplication
 
-  // --- STAP 1: Loop EENMAAL door alle berichten ---
+  // Global deduplication cache (cross-thread)
+  const globalCache = CONFIG.ENABLE_GLOBAL_DEDUPLICATION ? CacheService.getScriptCache() : null;
+
+  // --- STEP 1: Loop ONCE through all messages ---
+  let uploadCount = 0; // Track actual uploads for sleep optimization
+  let totalBytes = 0;  // Track bytes for metrics
+
   messages.forEach((msg, idx) => {
-    // 1. Haal info op (headers, body) voor *elk* bericht
+    // 1. Get info (headers, body) for *each* message
     const info = extractMessageInfo_(msg);
-    messagesToDigest.push(info); // Sla info op om later de digest te bouwen
+    messagesToDigest.push(info);
 
-    // 2. Controleer op bijlagen in dit bericht
+    // 2. Check for attachments in this message
     if (msg.isInTrash() || msg.getFrom().includes(me)) {
       return;
     }
     const atts = msg.getAttachments({ includeInlineImages: CONFIG.INCLUDE_INLINE_IMAGES, includeAttachments: true });
     if (atts.length === 0) return;
 
-    // 3. Filter bijlagen op grootte
+    // 3. Filter attachments by size
     const bigAtts = atts.filter(b => b.getSize() >= CONFIG.SIZE_THRESHOLD_BYTES);
     if (bigAtts.length === 0) return;
 
-    // 4. Upload relevante bijlagen
+    // 4. Upload relevant attachments
     for (const blob of bigAtts) {
       const bytes = blob.getBytes();
       const hash = sha256Hex_(bytes);
       const originalName = blob.getName() || 'attachment.bin';
+
+      // Skip duplicates within the same thread
+      if (uploadedHashes.has(hash)) {
+        Logger.log('     -> Duplicate attachment found (hash: %s), upload skipped.', hash.substring(0, 10));
+        incrementMetric_('duplicates_skipped');
+        continue;
+      }
+
+      // Check global cache for cross-thread duplicates
+      if (globalCache) {
+        const cacheKey = `uploaded_${hash}`;
+        const cachedInfo = globalCache.get(cacheKey);
+
+        if (cachedInfo) {
+          const existing = JSON.parse(cachedInfo);
+          Logger.log('     -> File already uploaded in thread %s, reusing link', existing.threadId.substring(0, 10));
+          allUploaded.push({
+            name: originalName,
+            size: bytes.length,
+            link: existing.link
+          });
+          uploadedHashes.add(hash);
+          incrementMetric_('duplicates_skipped');
+          continue;
+        }
+      }
+
       const safeName = sanitizeFilename_(originalName);
       const fileName = `${info.messageIdGmail}__${hash}__${safeName}`;
-      
-      // Gebruik de storage provider
+
+      // PREVIEW MODE: Log but don't actually upload
+      if (CONFIG.PREVIEW_MODE) {
+        Logger.log('     [PREVIEW] Would upload -> %s (%s)', fileName, ACTIVE_STORAGE_PROVIDER);
+        allUploaded.push({
+          name: originalName,
+          size: bytes.length,
+          link: '[PREVIEW - Not uploaded]'
+        });
+        uploadedHashes.add(hash);
+        continue;
+      }
+
       Logger.log('     UPLOAD -> %s (%s)', fileName, ACTIVE_STORAGE_PROVIDER);
       const uploadResult = storage.uploadFile(fileName, blob, info);
+      uploadedHashes.add(hash);
+      uploadCount++;
+      totalBytes += bytes.length;
 
       let linkToShow;
       try {
@@ -290,27 +440,43 @@ function processThreadAndCreateNewDigest_(thread, me, storage) {
         Logger.log('     Share link failed, falling back to UI link: %s', e.message);
         linkToShow = storage.createUiLink(fileName, uploadResult);
       }
-      
+
       allUploaded.push({
         name: originalName,
         size: bytes.length,
         link: linkToShow
       });
+
+      // Store in global cache for cross-thread deduplication
+      if (globalCache) {
+        const cacheKey = `uploaded_${hash}`;
+        globalCache.put(cacheKey, JSON.stringify({
+          threadId: thread.getId(),
+          link: linkToShow,
+          uploadedAt: Date.now()
+        }), 86400); // 24 hour cache
+      }
+    }
+
+    // Sleep only AFTER processing all attachments in this message (if any were uploaded)
+    if (uploadCount > 0 && bigAtts.length > 0) {
       Utilities.sleep(CONFIG.SLEEP_AFTER_UPLOAD_MS);
     }
   });
 
-  // Als er geen bijlagen zijn gevonden die aan de drempel voldoen
   if (allUploaded.length === 0) {
     Logger.log('--- THREAD skip (no attachments passed filter) ---');
-    return false; // Return 'false' (overgeslagen)
+    return false;
   }
 
-  // --- STAP 2: Bouw de HTML/Tekst body voor de NIEUWE mail ---
+  // --- STEP 2: Build the HTML/Text body for the NEW email ---
   const htmlBodyParts = [];
   const textBodyParts = [];
-  
-  const linkHtml = allUploaded.map(u => 
+
+  const MAX_BODY_CHARS = CONFIG.MAX_BODY_CHARS; // Use configurable limit
+
+  // Add the file links at the top
+  const linkHtml = allUploaded.map(u =>
     `<li><a href="${u.link}">${escapeHtml_(u.name)}</a> (${humanSize_(u.size)})</li>`
   ).join('');
   htmlBodyParts.push(`
@@ -319,17 +485,36 @@ function processThreadAndCreateNewDigest_(thread, me, storage) {
     <hr>
     <p><strong>Original thread content below:</strong></p>
   `);
-  
-  const linkText = allUploaded.map(u => 
+
+  const linkText = allUploaded.map(u =>
     `- ${u.name} (${humanSize_(u.size)})\n  Link: ${u.link}`
   ).join('\n');
   textBodyParts.push(`Uploaded attachments (${allUploaded.length} files):\n${linkText}\n\n---\nOriginal thread content below:\n---\n`);
 
-  // Loop nu door de *opgeslagen info* (veel sneller)
+  // Loop through the *stored info* and build digest
+  let totalTruncatedChars = 0; // Track truncation for logging
+
   messagesToDigest.forEach((info, idx) => {
     const labels = threadLabels.join(', ');
-    
-    const quotedHtml = info.htmlBody || escapeHtml_(info.plainBody);
+
+    // Remove base64 images FIRST, then truncate
+    let htmlContent = info.htmlBody || escapeHtml_(info.plainBody);
+    htmlContent = removeBase64Images_(htmlContent); // Remove inline images
+
+    if (htmlContent.length > MAX_BODY_CHARS) {
+      const truncated = htmlContent.length - MAX_BODY_CHARS;
+      totalTruncatedChars += truncated;
+      htmlContent = htmlContent.substring(0, MAX_BODY_CHARS) +
+        `<br><br><em>[... ${truncated} characters truncated due to Gmail limits ...]</em>`;
+    }
+
+    let textContent = info.plainBody;
+    if (textContent.length > MAX_BODY_CHARS) {
+      const truncated = textContent.length - MAX_BODY_CHARS;
+      textContent = textContent.substring(0, MAX_BODY_CHARS) +
+        `\n\n[... ${truncated} characters truncated due to Gmail limits ...]`;
+    }
+
     htmlBodyParts.push(`
       <div style="border:1px solid #ccc;padding:10px;margin-bottom:10px;border-radius:8px;">
         <p><strong>Message ${idx + 1}</strong><br>
@@ -341,7 +526,7 @@ function processThreadAndCreateNewDigest_(thread, me, storage) {
         <strong>Original Thread Labels:</strong> ${escapeHtml_(labels)}</p>
         <hr>
         <blockquote style="border-left:3px solid #eee;padding-left:12px;margin-left:5px;">
-          ${quotedHtml}
+          ${htmlContent}
         </blockquote>
       </div>
     `);
@@ -354,69 +539,105 @@ function processThreadAndCreateNewDigest_(thread, me, storage) {
       `Date: ${String(info.date)}\n` +
       `Subject: ${info.subject}\n` +
       `Original Thread Labels: ${labels}\n\n` +
-      `${info.plainBody}\n\n`
+      `${textContent}\n\n`
     );
   });
-  
+
+  // Log truncation metrics if significant content was removed
+  if (totalTruncatedChars > 0) {
+    Logger.log('   -> WARNING: Truncated %s total characters from %s messages', totalTruncatedChars, messagesToDigest.length);
+  }
+
   const finalHtmlBody = htmlBodyParts.join('');
   const finalTextBody = textBodyParts.join('---\n');
-  const finalSubject = `${CONFIG.DIGEST_SUBJECT_PREFIX} ${thread.getFirstMessageSubject()}`;
 
-  // --- STAP 3: Stuur de nieuwe mail (robuuste methode) ---
+  // Fallback for 'null' subjects
+  const originalSubject = thread.getFirstMessageSubject() || '(no subject)';
+  // Truncate subject to prevent "Argument too large" error
+  const truncatedSubject = (originalSubject.length > 200) ? originalSubject.substring(0, 200) + '...' : originalSubject;
+  const finalSubject = `${CONFIG.DIGEST_SUBJECT_PREFIX} ${truncatedSubject}`;
+
+  // --- STEP 3: Send the new email ---
+  // PREVIEW MODE: Log but don't actually send
+  if (CONFIG.PREVIEW_MODE) {
+    Logger.log('   [PREVIEW] Would create digest with subject: %s', finalSubject);
+    Logger.log('   [PREVIEW] Would trash thread: %s', thread.getId());
+    Logger.log('   [PREVIEW] Preview complete. No changes made.');
+    return true; // Return success in preview mode
+  }
+
+  // Wrap draft creation in try-catch to cleanup orphans on error
+  let draft = null;
   try {
     Logger.log('   Creating new draft...');
-    const draft = GmailApp.createDraft(me, finalSubject, finalTextBody, {
+    draft = GmailApp.createDraft(me, finalSubject, finalTextBody, {
       htmlBody: finalHtmlBody,
       name: 'Gmail Archiver Script'
     });
 
     const message = draft.send();
     Logger.log('   New digest email sent (Message ID: %s)', message.getId());
+
+    // Track metrics
+    incrementMetric_('files_uploaded', allUploaded.length);
+    incrementMetric_('bytes_uploaded', totalBytes);
     
     const newDigestThread = message.getThread();
     if (newDigestThread) {
       Logger.log('   New digest thread found (id: %s). Archiving and applying labels...', newDigestThread.getId());
-      
-      // --- NIEUWE FIX (V3.2): Pas de oude labels toe ---
-      // Systeemlabels die we niet handmatig kunnen/willen toevoegen
+
+      // Apply old labels to new thread
       const systemLabelsToIgnore = [
         'INBOX', 'UNREAD', 'SENT', 'DRAFT', 'TRASH', 'SPAM',
-        CONFIG.PROCESSING_LABEL, CONFIG.PROCESSED_LABEL, 
+        'IMPORTANT', 'STARRED', 'CATEGORY_PERSONAL', 'CATEGORY_SOCIAL',
+        'CATEGORY_PROMOTIONS', 'CATEGORY_UPDATES', 'CATEGORY_FORUMS',
+        CONFIG.PROCESSED_LABEL, CONFIG.PROCESSING_LABEL,
         CONFIG.PROCESSED_ERROR_LABEL, CONFIG.PROCESSED_SKIPPED_LABEL,
         CONFIG.TEST_MODE_LABEL
       ];
-      
+
       threadLabels.forEach(labelName => {
-        // Filter de script-labels en systeem-labels eruit
-        // We controleren zowel de exacte naam als de hoofdletterversie voor de zekerheid
-        if (systemLabelsToIgnore.includes(labelName) || 
-            systemLabelsToIgnore.includes(labelName.toUpperCase())) {
-          return; // Sla dit label over
+        const labelUpper = labelName ? labelName.toUpperCase() : '';
+        if (!labelName || systemLabelsToIgnore.some(sys => sys === labelUpper)) {
+          return;
         }
-        
         try {
-          // Haal het label-object op (of maak het aan) en voeg het toe
           const label = getOrCreateLabel_(labelName);
-          if (label) {
-            newDigestThread.addLabel(label);
-          }
+          if (label) newDigestThread.addLabel(label);
         } catch (e) {
-          // Log een waarschuwing maar stop het script niet
-          Logger.log('     WAARSCHUWING: Kon label "%s" niet toevoegen aan nieuwe thread: %s', labelName, e.message);
+          Logger.log('     -> WARN: Could not apply old label "%s": %s', labelName, e.message);
         }
       });
-      // --- EINDE FIX ---
 
       newDigestThread.moveToArchive();
-      Logger.log('   New digest thread successfully archived and labeled.');
+
+      // Apply read status (match original)
+      if (!isOriginalUnread) {
+        newDigestThread.markRead();
+        Logger.log('   New digest thread marked as read (matching original).');
+      } else {
+        Logger.log('   New digest thread left unread (matching original).');
+      }
+
+      Logger.log('   New digest thread successfully archived.');
     } else {
       Logger.log('   CRITICAL: Could not get thread from sent message.');
       throw new Error('Could not get thread from sent message. Old thread will not be trashed.');
     }
-    
+
     return true; // Success
 
   } catch (e) {
+    // Cleanup orphaned draft
+    if (draft) {
+      try {
+        draft.deleteDraft();
+        Logger.log('   Cleaned up orphaned draft after error.');
+      } catch (e2) {
+        Logger.log('   Failed to clean up draft: %s', e2.message);
+      }
+    }
+
     Logger.log('   ERROR sending/finding new digest email: %s', e.message);
     throw new Error('Sending/finding new digest failed: ' + e.message);
   }
@@ -428,10 +649,9 @@ function processThreadAndCreateNewDigest_(thread, me, storage) {
 // ===================================================================================
 
 /**
- * Haalt een Gmail-label op naam op, of maakt het aan als het niet bestaat.
- * @param {string} name De naam van het label.
- * @returns {GmailApp.Label} Het label-object.
- * @private
+ * Gets a Gmail label by name, creates it if it doesn't exist.
+ * @param {string} name The label name.
+ * @returns {GmailApp.Label} The label object.
  */
 function getOrCreateLabel_(name) {
   if (!name) {
@@ -447,9 +667,9 @@ function getOrCreateLabel_(name) {
 }
 
 /**
- * Extraheert belangrijke info uit een GmailMessage-object.
- * @param {GmailApp.Message} msg Het berichtobject.
- * @returns {object} Een info-object.
+ * Extracts important information from a GmailMessage object.
+ * @param {GmailApp.Message} msg The message object.
+ * @returns {object} An info object.
  * @private
  */
 function extractMessageInfo_(msg) {
@@ -458,47 +678,24 @@ function extractMessageInfo_(msg) {
     threadId: msg.getThread().getId(),
     messageIdGmail: msg.getId(),
     messageIdRfc822: rfcMsgId.replace(/[<>]/g, ''),
-    from: msg.getFrom(),
-    to: msg.getTo(),
+    from: msg.getFrom() || '(unknown sender)',
+    to: msg.getTo() || '(unknown recipient)',
     cc: msg.getCc() || '',
-    date: msg.getDate(),
-    subject: msg.getSubject(),
-    plainBody: msg.getPlainBody(),
-    htmlBody: msg.getBody()
+    date: msg.getDate() || new Date(),
+    subject: msg.getSubject() || '(no subject)',
+    plainBody: msg.getPlainBody() || '',
+    htmlBody: msg.getBody() || ''
   };
 }
 
-/**
- * Haalt een map (id->naam) van alle Gmail-labels op, met 6 uur cache.
- * @returns {object} De label-map {id: name}.
- * @private
- */
-function getLabelIdNameMap_() {
-  const cache = CacheService.getScriptCache();
-  const CACHE_KEY = 'GMAIL_LABEL_MAP_V3'; // v3 voor modulaire versie
-  let mapJson = cache.get(CACHE_KEY);
-  if (mapJson) return JSON.parse(mapJson);
-  
-  Logger.log('Label map cache is empty, refilling via API...');
-  const map = {};
-  try {
-    const res = Gmail.Users.Labels.list('me');
-    if (res.labels) res.labels.forEach(l => { map[l.id] = l.name; });
-  } catch (e) {
-    Logger.log('Could not fetch labels via Gmail API: %s', e.message);
-  }
-  cache.put(CACHE_KEY, JSON.stringify(map), 21600); // 6-hour cache
-  return map;
-}
-
 // ===================================================================================
-// UTILITIES (Algemeen)
+// UTILITIES (General)
 // ===================================================================================
 
 /**
- * Berekent een SHA256-hash van bytes.
- * @param {byte[]} bytes De bytes van het bestand.
- * @returns {string} De 64-karakter hex hash.
+ * Calculates a SHA256 hash of file bytes.
+ * @param {byte[]} bytes The file bytes.
+ * @returns {string} The 64-character hex hash.
  * @private
  */
 function sha256Hex_(bytes) {
@@ -507,20 +704,43 @@ function sha256Hex_(bytes) {
 }
 
 /**
- * Maakt een bestandsnaam veilig voor bestandssystemen.
- * @param {string} name De originele bestandsnaam.
- * @returns {string} De "schone" bestandsnaam.
+ * Makes a filename safe for filesystems.
+ * Removes unsafe characters, prevents reserved names, and limits length.
+ * @param {string} name The original filename.
+ * @returns {string} The "safe" filename.
  * @private
  */
 function sanitizeFilename_(name) {
   if (!name) return 'unknown_file';
-  return name.replace(/[/\\?%*:|"<>]/g, '_').replace(/\s+/g, ' ').trim();
+
+  // Remove unsafe characters
+  let safe = name.replace(/[/\\?%*:|"<>]/g, '_')
+                 .replace(/\s+/g, ' ')
+                 .trim()
+                 .replace(/^\.+/, '') // No leading dots
+                 .replace(/\.+$/, ''); // No trailing dots
+
+  // Check length (leave room for prefix in main code)
+  const maxLen = 200; // Conservative limit
+  if (safe.length > maxLen) {
+    // Preserve extension if possible
+    const ext = safe.match(/\.[^.]+$/)?.[0] || '';
+    safe = safe.substring(0, maxLen - ext.length) + ext;
+  }
+
+  // Check for Windows reserved names
+  const reserved = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)/i;
+  if (reserved.test(safe)) {
+    safe = '_' + safe;
+  }
+
+  return safe || 'unknown_file';
 }
 
 /**
- * Converteert bytes naar een leesbaar formaat (KB, MB, etc.).
- * @param {number} n Het aantal bytes.
- * @returns {string} De leesbare grootte.
+ * Converts bytes to a human-readable format (KB, MB, etc.).
+ * @param {number} n The number of bytes.
+ * @returns {string} The readable size.
  * @private
  */
 function humanSize_(n) {
@@ -531,9 +751,9 @@ function humanSize_(n) {
 }
 
 /**
- * Escapet HTML-speciale tekens.
- * @param {string} s De te escapen string.
- * @returns {string} De ge-escapete string.
+ * Escapes HTML special characters.
+ * @param {string} s The string to escape.
+ * @returns {string} The escaped string.
  * @private
  */
 function escapeHtml_(s) {
@@ -542,10 +762,10 @@ function escapeHtml_(s) {
 }
 
 /**
- * Kort HTML of tekst netjes in.
- * @param {string} html De string om in te korten.
- * @param {number} maxLen De maximale lengte.
- * @returns {string} De ingekorte string.
+ * Truncates HTML or text neatly.
+ * @param {string} html The string to truncate.
+ * @param {number} maxLen The maximum length.
+ * @returns {string} The truncated string.
  * @private
  */
 function trimHtml_(html, maxLen) {
@@ -554,18 +774,235 @@ function trimHtml_(html, maxLen) {
   return s.length > maxLen ? s.slice(0, maxLen) + '…' : s;
 }
 
+/**
+ * Removes inline Base64 images from HTML string.
+ * Only removes images larger than the configured threshold to save space.
+ * Small images (logos, icons) are preserved.
+ * @param {string} html The original HTML.
+ * @returns {string} The cleaned HTML.
+ * @private
+ */
+function removeBase64Images_(html) {
+  if (!html) return '';
+
+  return html.replace(/<img[^>]*src=["']data:image\/[^;]+;base64,([^"']+)["'][^>]*>/gi, (match, base64) => {
+    // Estimate byte size (base64 is ~33% overhead, so 1 char ≈ 0.75 bytes)
+    const estimatedBytes = base64.length * 0.75;
+
+    if (estimatedBytes > CONFIG.MAX_INLINE_IMAGE_BYTES) {
+      return '<span style="color:#888; font-style:italic;">[Large inline image removed to save space]</span>';
+    }
+
+    // Keep small images
+    return match;
+  });
+}
+
 // ===================================================================================
-// TRIGGER MANAGEMENT (voor batches)
+// PROGRESS NOTIFICATIONS
 // ===================================================================================
 
 /**
- * Maakt een nieuwe trigger om het script later opnieuw te starten.
- * @param {string} handlerFunction De naam van de functie (bv. 'runProduction').
- * @param {number} waitMinutes Het aantal minuten om te wachten.
+ * Sends a progress notification email after batch completion.
+ * @param {object} stats Batch statistics object.
+ * @private
+ */
+function sendProgressNotification_(stats) {
+  try {
+    const props = PropertiesService.getScriptProperties().getProperties();
+    const totalProcessed = props.metric_threads_processed || '0';
+    const totalBytes = parseInt(props.metric_bytes_uploaded || '0');
+
+    const subject = `[Gmail Archiver] Batch Complete - ${stats.processed} threads processed`;
+    const body = `
+Gmail Attachment Archiver - Batch Report
+========================================
+
+BATCH RESULTS:
+• Threads Processed: ${stats.processed}
+• Threads Skipped: ${stats.skipped}
+• Threads Errored: ${stats.errored}
+
+CUMULATIVE TOTALS:
+• Total Threads Processed: ${totalProcessed}
+• Total Space Saved: ${humanSize_(totalBytes)}
+• Duplicate Files Skipped: ${props.metric_duplicates_skipped || '0'}
+
+NEXT BATCH:
+${stats.nextRunMinutes > 0
+  ? `Scheduled in ${stats.nextRunMinutes} minutes`
+  : 'No more work to do - all done!'}
+
+---
+Generated by Gmail Attachment Archiver v4.9
+Run showMetrics() in the script editor to see full statistics.
+    `;
+
+    GmailApp.sendEmail(Session.getActiveUser().getEmail(), subject, body);
+    Logger.log('Progress notification sent.');
+  } catch (e) {
+    Logger.log('Failed to send progress notification: %s', e.message);
+  }
+}
+
+// ===================================================================================
+// USER-FRIENDLY ERROR MESSAGES
+// ===================================================================================
+
+/**
+ * Wraps technical errors with user-friendly explanations.
+ * @param {string} technicalError The raw error message.
+ * @param {string} context Optional context about what was being done.
+ * @returns {Error} Enhanced error with user guidance.
+ * @private
+ */
+function createUserFriendlyError_(technicalError, context) {
+  const userMessages = {
+    '401': {
+      title: 'Authentication Failed',
+      message: 'Your Nextcloud app password may be incorrect or expired.',
+      solution: 'Go to Nextcloud → Settings → Security → Create new app password, then run setupCredentials() again.'
+    },
+    '403': {
+      title: 'Permission Denied',
+      message: 'Your Nextcloud user doesn\'t have write access to the folder.',
+      solution: `Check folder permissions in Nextcloud or change ROOT_PATH (currently: "${CONFIG.ROOT_PATH}") in Config.gs.`
+    },
+    '404': {
+      title: 'Folder Not Found',
+      message: `The ROOT_PATH "${CONFIG.ROOT_PATH}" does not exist in Nextcloud.`,
+      solution: `Create the folder "${CONFIG.ROOT_PATH}" in Nextcloud, or change ROOT_PATH in Config.gs.`
+    },
+    'Email Body Size': {
+      title: 'Email Too Large',
+      message: 'Email is too large to send (over 25MB after attachments removed).',
+      solution: 'Lower MAX_BODY_CHARS in Config.gs to 5000 and try again.'
+    },
+    'Service invoked too many times': {
+      title: 'Daily Email Quota Reached',
+      message: 'Gmail allows maximum 100 emails per day. You\'ve hit that limit.',
+      solution: 'This is a Google limit. Script will automatically retry tomorrow. No action needed.'
+    },
+    'User-rate limit exceeded': {
+      title: 'Rate Limit Hit',
+      message: 'Too many API calls in short time.',
+      solution: 'Script will automatically wait 15 minutes and retry. No action needed.'
+    }
+  };
+
+  for (const [pattern, info] of Object.entries(userMessages)) {
+    if (technicalError.includes(pattern)) {
+      const friendlyMsg = `
+╔═══════════════════════════════════════════════════════════╗
+║  ${info.title.toUpperCase()}
+╚═══════════════════════════════════════════════════════════╝
+
+❌ Problem: ${info.message}
+
+✅ Solution: ${info.solution}
+
+═══════════════════════════════════════════════════════════
+Technical Details:
+${technicalError}
+${context ? '\nContext: ' + context : ''}
+═══════════════════════════════════════════════════════════
+      `.trim();
+
+      return new Error(friendlyMsg);
+    }
+  }
+
+  return new Error(technicalError); // Fallback to original
+}
+
+// ===================================================================================
+// METRICS SYSTEM
+// ===================================================================================
+
+/**
+ * Increments a metric counter.
+ * @param {string} key Metric name.
+ * @param {number} amount Amount to add (default: 1).
+ * @private
+ */
+function incrementMetric_(key, amount = 1) {
+  const props = PropertiesService.getScriptProperties();
+  const current = parseInt(props.getProperty(`metric_${key}`) || '0');
+  props.setProperty(`metric_${key}`, String(current + amount));
+}
+
+/**
+ * Records a metric value (not incremental).
+ * @param {string} key Metric name.
+ * @param {number} value Value to record.
+ * @private
+ */
+function recordMetric_(key, value) {
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty(`metric_${key}`, String(value));
+}
+
+/**
+ * Displays all collected metrics.
+ * Run this to see script performance statistics.
+ */
+function showMetrics() {
+  const props = PropertiesService.getScriptProperties();
+  const allProps = props.getProperties();
+
+  Logger.log('=== GMAIL ARCHIVER METRICS ===');
+  Logger.log('Threads Processed: %s', allProps.metric_threads_processed || '0');
+  Logger.log('Threads Skipped: %s', allProps.metric_threads_skipped || '0');
+  Logger.log('Threads Errored: %s', allProps.metric_threads_errored || '0');
+  Logger.log('Files Uploaded: %s', allProps.metric_files_uploaded || '0');
+  Logger.log('Bytes Uploaded: %s (%s)',
+    allProps.metric_bytes_uploaded || '0',
+    humanSize_(parseInt(allProps.metric_bytes_uploaded || '0')));
+  Logger.log('Duplicate Files Skipped: %s', allProps.metric_duplicates_skipped || '0');
+  Logger.log('Last Run: %s', allProps.metric_last_run || 'Never');
+  Logger.log('Total Batches: %s', allProps.metric_total_batches || '0');
+
+  // Calculate success rate
+  const total = parseInt(allProps.metric_threads_processed || '0') +
+                parseInt(allProps.metric_threads_errored || '0');
+  const successRate = total > 0
+    ? ((parseInt(allProps.metric_threads_processed || '0') / total) * 100).toFixed(1)
+    : '0';
+  Logger.log('Success Rate: %s%%', successRate);
+  Logger.log('==============================');
+}
+
+/**
+ * Resets all metrics to zero.
+ * Use this to start fresh tracking.
+ */
+function resetMetrics() {
+  const props = PropertiesService.getScriptProperties();
+  const allProps = props.getProperties();
+
+  let count = 0;
+  Object.keys(allProps).forEach(key => {
+    if (key.startsWith('metric_')) {
+      props.deleteProperty(key);
+      count++;
+    }
+  });
+
+  Logger.log('All metrics reset (%s properties cleared).', count);
+}
+
+// ===================================================================================
+// TRIGGER MANAGEMENT (for batches)
+// ===================================================================================
+
+/**
+ * Creates a new trigger to restart the script later.
+ * @param {string} handlerFunction The name of the function to trigger (e.g., 'runProduction').
+ * @param {number} waitMinutes The number of minutes to wait.
  * @private
  */
 function createContinuationTrigger_(handlerFunction, waitMinutes) {
-  deleteContinuationTriggers_(handlerFunction); // Verwijder eerst oude
+  deleteContinuationTriggers_(handlerFunction); // Delete old ones first
   const waitMs = (waitMinutes || 5) * 60 * 1000;
   ScriptApp.newTrigger(handlerFunction)
     .timeBased()
@@ -575,8 +1012,8 @@ function createContinuationTrigger_(handlerFunction, waitMinutes) {
 }
 
 /**
- * Verwijdert oude triggers om de "too many triggers" fout te voorkomen.
- * @param {string} handlerFunction De naam van de functie om triggers voor te wissen.
+ * Deletes old triggers to prevent the "too many triggers" error.
+ * @param {string} handlerFunction The name of the function for which triggers should be cleared.
  * @private
  */
 function deleteContinuationTriggers_(handlerFunction) {
@@ -596,13 +1033,13 @@ function deleteContinuationTriggers_(handlerFunction) {
 
 
 /**
- * Stelt de hoofd-trigger (elk uur) in voor `runProduction`.
- * Draai deze functie eenmalig vanuit de editor.
+ * Sets up the main trigger (every hour) for `runProduction`.
+ * Run this function once from the editor.
  */
 function setupTriggerHourly() {
-  deleteContinuationTriggers_('runProduction'); // Verwijder actieve batch-triggers
-  
-  // Verwijder bestaande 'runProduction' uur-triggers
+  deleteContinuationTriggers_('runProduction'); // Remove active batch triggers
+
+  // Remove existing 'runProduction' hourly triggers
   const triggers = ScriptApp.getProjectTriggers();
   for (const trigger of triggers) {
     if (trigger.getHandlerFunction() === 'runProduction') {
@@ -610,28 +1047,460 @@ function setupTriggerHourly() {
       Logger.log('Old hourly "runProduction" trigger deleted.');
     }
   }
-  
-  // Maak nieuwe trigger
+
+  // Create new trigger
   ScriptApp.newTrigger('runProduction').timeBased().everyHours(1).create();
   Logger.log('New hourly "runProduction" trigger created.');
 }
 
+
 // ===================================================================================
-// DEBUG HELPERS (optioneel)
+// DRAFT CLEANUP TOOL
 // ===================================================================================
 
 /**
- * Test je GMAIL_QUERY en kijk welke threads het vindt.
- * Draait *exact dezelfde* query-logica als `runProduction` of `runTest`.
+ * Utility to safely clean up "orphaned" drafts created by this script.
+ * This ONLY deletes drafts whose subject starts with your DIGEST_SUBJECT_PREFIX.
+ * Use this if you accidentally have hundreds of drafts after an error.
+ */
+function cleanupOrphanedDrafts() {
+  const prefix = CONFIG.DIGEST_SUBJECT_PREFIX;
+  Logger.log('--- cleanupOrphanedDrafts START ---');
+  Logger.log('Searching for drafts starting with: "%s"', prefix);
+
+  const drafts = GmailApp.getDrafts();
+  let deletedCount = 0;
+
+  drafts.forEach(draft => {
+    const message = draft.getMessage();
+    const subject = message.getSubject();
+
+    if (subject && subject.startsWith(prefix)) {
+      try {
+        draft.deleteDraft();
+        deletedCount++;
+      } catch (e) {
+        Logger.log('Failed to delete draft %s: %s', draft.getId(), e.message);
+      }
+    }
+  });
+
+  Logger.log('--- DONE. Deleted %s orphaned drafts. ---', deletedCount);
+}
+
+// ===================================================================================
+// STUCK LABEL FIX TOOL
+// ===================================================================================
+
+/**
+ * Removes the 'Processing-Attachment' label from ALL threads.
+ * Use this if threads are 'stuck' due to a crash/interruption.
+ */
+function resetStuckProcessingLabels() {
+  Logger.log('--- resetStuckProcessingLabels START ---');
+
+  const processingLabelName = CONFIG.PROCESSING_LABEL;
+  const label = GmailApp.getUserLabelByName(processingLabelName);
+
+  if (!label) {
+    Logger.log('Label "%s" does not exist. Nothing to do.', processingLabelName);
+    return;
+  }
+
+  // Find threads with this label
+  // We use batch processing because there may be many
+  let threads = label.getThreads(0, 100);
+  let count = 0;
+
+  while (threads.length > 0) {
+    Logger.log('Batch of %s threads found. Removing label...', threads.length);
+    // GmailApp.removeLabel supports batches of up to 100 threads at once!
+    label.removeFromThreads(threads);
+    count += threads.length;
+
+    // Get the next batch (which has now 'shifted' because they no longer have the label)
+    // But wait a moment to give the API breathing room
+    Utilities.sleep(1000);
+    threads = label.getThreads(0, 100);
+  }
+
+  Logger.log('--- DONE. %s threads repaired (label "%s" removed). ---', count, processingLabelName);
+}
+
+// ===================================================================================
+// READ STATUS FIX TOOL
+// ===================================================================================
+
+/**
+ * Marks all [ARCHIVED-DIGEST] threads as read, except those in the inbox.
+ * Use this if your archive is full of unread digests.
+ */
+function markArchivedDigestsAsRead() {
+  Logger.log('--- markArchivedDigestsAsRead START ---');
+
+  const query = `subject:("${CONFIG.DIGEST_SUBJECT_PREFIX}") is:unread -in:inbox`;
+  Logger.log('Searching for threads with query: %s', query);
+
+  // Process in batches of 100
+  let threads = GmailApp.search(query, 0, 100);
+  let totalProcessed = 0;
+
+  while (threads.length > 0) {
+    Logger.log('Batch of %s threads found. Marking as read...', threads.length);
+    GmailApp.markThreadsRead(threads);
+    totalProcessed += threads.length;
+
+    // Short pause
+    Utilities.sleep(1000);
+
+    // Find the next batch (the previous ones are now read, so they won't be found)
+    threads = GmailApp.search(query, 0, 100);
+  }
+
+  Logger.log('--- DONE. Total %s archived digest threads marked as read. ---', totalProcessed);
+}
+
+
+// ===================================================================================
+// CONFIGURATION VALIDATOR
+// ===================================================================================
+
+/**
+ * Validates all configuration settings.
+ * Run this after changing Config.gs to catch errors early.
+ */
+function validateConfiguration() {
+  Logger.log('=== VALIDATING CONFIGURATION ===');
+  const errors = [];
+  const warnings = [];
+
+  // Check storage provider
+  if (!['Nextcloud', 'GoogleDrive'].includes(ACTIVE_STORAGE_PROVIDER)) {
+    errors.push(`Invalid ACTIVE_STORAGE_PROVIDER: "${ACTIVE_STORAGE_PROVIDER}". Must be "Nextcloud" or "GoogleDrive".`);
+  }
+
+  // Check provider-specific config
+  if (ACTIVE_STORAGE_PROVIDER === 'Nextcloud') {
+    if (!CONFIG.BASE_URL) {
+      errors.push('BASE_URL cannot be empty');
+    } else if (!CONFIG.BASE_URL.startsWith('https://')) {
+      errors.push('BASE_URL must use HTTPS (found: ' + CONFIG.BASE_URL + ')');
+    }
+
+    if (!CONFIG.BASE_WEBDAV) {
+      errors.push('BASE_WEBDAV cannot be empty');
+    } else if (!CONFIG.BASE_WEBDAV.startsWith('https://')) {
+      errors.push('BASE_WEBDAV must use HTTPS (found: ' + CONFIG.BASE_WEBDAV + ')');
+    }
+
+    if (!CONFIG.ROOT_PATH) {
+      errors.push('ROOT_PATH cannot be empty');
+    }
+  }
+
+  if (ACTIVE_STORAGE_PROVIDER === 'GoogleDrive') {
+    if (!CONFIG.ROOT_FOLDER_ID) {
+      errors.push('ROOT_FOLDER_ID cannot be empty');
+    }
+  }
+
+  // Check numeric ranges
+  if (CONFIG.MIN_ATTACHMENT_SIZE_KB < 1) {
+    errors.push('MIN_ATTACHMENT_SIZE_KB must be at least 1');
+  }
+
+  if (CONFIG.MAX_THREADS_PER_RUN < 1 || CONFIG.MAX_THREADS_PER_RUN > 100) {
+    errors.push('MAX_THREADS_PER_RUN must be between 1 and 100');
+  }
+
+  if (CONFIG.EXECUTION_TIME_LIMIT_MINUTES > 5) {
+    warnings.push('EXECUTION_TIME_LIMIT_MINUTES is > 5. Script timeout is 6 minutes, leaving little safety margin.');
+  }
+
+  if (CONFIG.MAX_BODY_CHARS < 1000) {
+    warnings.push('MAX_BODY_CHARS is very low (' + CONFIG.MAX_BODY_CHARS + '). Digests may have very little content.');
+  }
+
+  // Check Gmail query
+  if (!CONFIG.GMAIL_QUERY_BASE) {
+    errors.push('GMAIL_QUERY_BASE cannot be empty');
+  } else if (!CONFIG.GMAIL_QUERY_BASE.includes('has:attachment')) {
+    warnings.push('GMAIL_QUERY_BASE should probably include "has:attachment"');
+  }
+
+  // Check processing hours format
+  if (CONFIG.PROCESSING_HOURS) {
+    if (typeof CONFIG.PROCESSING_HOURS.START !== 'number' || typeof CONFIG.PROCESSING_HOURS.END !== 'number') {
+      errors.push('PROCESSING_HOURS must have numeric START and END properties');
+    } else if (CONFIG.PROCESSING_HOURS.START < 0 || CONFIG.PROCESSING_HOURS.START > 23) {
+      errors.push('PROCESSING_HOURS.START must be between 0 and 23');
+    } else if (CONFIG.PROCESSING_HOURS.END < 0 || CONFIG.PROCESSING_HOURS.END > 23) {
+      errors.push('PROCESSING_HOURS.END must be between 0 and 23');
+    }
+  }
+
+  // Test storage provider
+  try {
+    const provider = getStorageProvider_();
+    if (!provider) {
+      errors.push('Storage provider not configured correctly');
+    } else {
+      Logger.log('✅ Storage provider (%s) loaded successfully', ACTIVE_STORAGE_PROVIDER);
+    }
+  } catch (e) {
+    errors.push('Storage provider error: ' + e.message);
+  }
+
+  // Report results
+  if (errors.length > 0) {
+    Logger.log('\n❌ CONFIGURATION ERRORS (%s):', errors.length);
+    errors.forEach(e => Logger.log('  • ' + e));
+  }
+
+  if (warnings.length > 0) {
+    Logger.log('\n⚠️  CONFIGURATION WARNINGS (%s):', warnings.length);
+    warnings.forEach(w => Logger.log('  • ' + w));
+  }
+
+  if (errors.length === 0 && warnings.length === 0) {
+    Logger.log('\n✅ Configuration is valid!');
+    Logger.log('No errors or warnings found.');
+    return true;
+  }
+
+  Logger.log('\n' + '='.repeat(50));
+  return errors.length === 0;
+}
+
+// ===================================================================================
+// EMERGENCY ROLLBACK
+// ===================================================================================
+
+/**
+ * Emergency rollback: restores last batch of threads from trash.
+ * ONLY works if threads are still in trash (< 30 days).
+ * WARNING: Does NOT remove digest emails or uploaded files.
+ */
+function emergencyRollback() {
+  Logger.log('=== EMERGENCY ROLLBACK START ===');
+  Logger.log('⚠️  WARNING: This will restore processed threads from trash.');
+  Logger.log('Digest emails and uploaded files will NOT be removed.');
+  Logger.log('');
+
+  const processedLabel = GmailApp.getUserLabelByName(CONFIG.PROCESSED_LABEL);
+  if (!processedLabel) {
+    Logger.log('❌ No processed label found. Nothing to rollback.');
+    return;
+  }
+
+  // Find threads in trash with Processed-Attachments label
+  const query = `in:trash label:${CONFIG.PROCESSED_LABEL}`;
+  Logger.log('Searching for threads to restore with query: %s', query);
+
+  const threads = GmailApp.search(query, 0, 100);
+  Logger.log('Found %s threads to restore', threads.length);
+
+  if (threads.length === 0) {
+    Logger.log('No threads to restore. Rollback complete.');
+    return;
+  }
+
+  let restoredCount = 0;
+  threads.forEach(thread => {
+    try {
+      thread.moveToInbox();
+      thread.removeLabel(processedLabel);
+      Logger.log('✅ Restored: %s', thread.getFirstMessageSubject());
+      restoredCount++;
+    } catch (e) {
+      Logger.log('❌ Failed to restore thread %s: %s', thread.getId(), e.message);
+    }
+  });
+
+  Logger.log('');
+  Logger.log('=== ROLLBACK COMPLETE ===');
+  Logger.log('Restored %s threads to inbox', restoredCount);
+  Logger.log('');
+  Logger.log('⚠️  IMPORTANT NOTES:');
+  Logger.log('• Digest emails are still in your archive');
+  Logger.log('• Files are still in cloud storage');
+  Logger.log('• You may want to manually clean these up');
+}
+
+// ===================================================================================
+// WEB DASHBOARD
+// ===================================================================================
+
+/**
+ * Serves a simple web dashboard showing script statistics.
+ * Deploy as web app: Publish → Deploy as web app → Execute as "Me" → Access "Anyone"
+ */
+function doGet() {
+  const props = PropertiesService.getScriptProperties().getProperties();
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Gmail Archiver Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 16px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+      overflow: hidden;
+    }
+    .header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 30px;
+      text-align: center;
+    }
+    .header h1 { font-size: 2em; margin-bottom: 10px; }
+    .header p { opacity: 0.9; }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 20px;
+      padding: 30px;
+    }
+    .stat-card {
+      background: #f8f9fa;
+      padding: 20px;
+      border-radius: 12px;
+      text-align: center;
+      border-left: 4px solid #667eea;
+    }
+    .stat-value {
+      font-size: 2.5em;
+      font-weight: bold;
+      color: #667eea;
+      margin: 10px 0;
+    }
+    .stat-label {
+      color: #6c757d;
+      font-size: 0.9em;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .footer {
+      background: #f8f9fa;
+      padding: 20px;
+      text-align: center;
+      color: #6c757d;
+      font-size: 0.9em;
+      border-top: 1px solid #dee2e6;
+    }
+    .success-rate {
+      font-size: 3em;
+      font-weight: bold;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>📊 Gmail Archiver Dashboard</h1>
+      <p>Real-time statistics for your email archiving process</p>
+    </div>
+
+    <div class="stats">
+      <div class="stat-card">
+        <div class="stat-label">Threads Processed</div>
+        <div class="stat-value">${props.metric_threads_processed || '0'}</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Threads Skipped</div>
+        <div class="stat-value">${props.metric_threads_skipped || '0'}</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Threads Errored</div>
+        <div class="stat-value">${props.metric_threads_errored || '0'}</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Files Uploaded</div>
+        <div class="stat-value">${props.metric_files_uploaded || '0'}</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Space Saved</div>
+        <div class="stat-value" style="font-size: 1.8em;">
+          ${humanSize_(parseInt(props.metric_bytes_uploaded || '0'))}
+        </div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Duplicates Skipped</div>
+        <div class="stat-value">${props.metric_duplicates_skipped || '0'}</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Total Batches</div>
+        <div class="stat-value">${props.metric_total_batches || '0'}</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Success Rate</div>
+        <div class="success-rate">
+          ${(() => {
+            const total = parseInt(props.metric_threads_processed || '0') +
+                         parseInt(props.metric_threads_errored || '0');
+            return total > 0
+              ? ((parseInt(props.metric_threads_processed || '0') / total) * 100).toFixed(1)
+              : '0';
+          })()}%
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <p><strong>Last Run:</strong> ${props.metric_last_run || 'Never'}</p>
+      <p style="margin-top: 10px;">Gmail Attachment Archiver v4.9</p>
+    </div>
+  </div>
+</body>
+</html>
+  `;
+
+  return HtmlService.createHtmlOutput(html)
+    .setTitle('Gmail Archiver Dashboard')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+// ===================================================================================
+// DEBUG HELPERS
+// ===================================================================================
+
+/**
+ * Tests the Gmail query that will be used by runTest or runProduction.
+ * Logs the first 20 threads found.
  */
 function testQuery() {
   let query = '';
-  
+
+  // Build labels query dynamically
   const labelsQuery = `-label:${CONFIG.PROCESSED_LABEL} ` +
                       `-label:${CONFIG.PROCESSING_LABEL} ` +
                       `-label:${CONFIG.PROCESSED_SKIPPED_LABEL} ` +
                       `-label:${CONFIG.PROCESSED_ERROR_LABEL}`;
-  
+
   if (CONFIG.TEST_MODE) {
     query = `label:${CONFIG.TEST_MODE_LABEL} ${labelsQuery}`;
     Logger.log('--- TEST MODE QUERY ---');
@@ -652,21 +1521,31 @@ function testQuery() {
 }
 
 /**
- * Test de verbinding en upload-credentials van de *actieve* storage provider.
+ * Tests the configured storage provider by uploading a test file
+ * and creating share/UI links.
  */
 function testStorageProvider() {
-  Logger.log('Testing storage provider: %s', ACTIVE_STORAGE_PROVIDER);
   try {
     const storage = getStorageProvider_();
+    if (!storage) return;
+
     const fileName = 'TEST__' + Date.now() + '__hello.txt';
     const blob = Utilities.newBlob('hello', 'text/plain', 'hello.txt');
-    
-    const uploadResult = storage.uploadFile(fileName, blob, { messageIdGmail: 'test-id' });
-    Logger.log('Test upload OK. Result/ID: %s', uploadResult);
-    
+
+    Logger.log('Testing upload...');
+    const uploadResult = storage.uploadFile(fileName, blob, null);
+    Logger.log('Test upload OK: %s', uploadResult);
+
+    Logger.log('Testing share link...');
+    const shareLink = storage.createShareLink(fileName, uploadResult);
+    Logger.log('Test share link OK: %s', shareLink);
+
+    Logger.log('Testing UI link...');
     const uiLink = storage.createUiLink(fileName, uploadResult);
-    Logger.log('Test link (UI): %s', uiLink);
+    Logger.log('Test UI link OK: %s', uiLink);
+
   } catch (e) {
     Logger.log('Test storage provider FAILED: %s', e.message);
+    Logger.log(e.stack);
   }
 }
