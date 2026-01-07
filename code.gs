@@ -523,7 +523,7 @@ function processThreadAndCreateNewDigest_(thread, me, storage) {
   htmlBodyParts.push(`
     <div style="font-family:Arial,sans-serif; max-width:800px; margin:0 auto; padding:20px; background:#ffffff;">
       <div style="background:linear-gradient(135deg, #667eea 0%, #764ba2 100%); color:white; padding:20px; border-radius:8px; margin-bottom:20px;">
-        <h2 style="margin:0; font-size:24px;">📎 Archived Attachments</h2>
+        <h2 style="margin:0; font-size:24px;">Archived Attachments</h2>
         <p style="margin:8px 0 0 0; opacity:0.9; font-size:14px;">${allUploaded.length} file(s) uploaded to cloud storage</p>
       </div>
       <div style="background:#f1f3f4; padding:15px; border-radius:8px; margin-bottom:20px;">
@@ -948,7 +948,7 @@ function stripEmailFooters_(html) {
   // Dutch disclaimers (very common in NL business emails)
   const dutchPatterns = [
     /De informatie verzonden in dit e-?mail[\s\S]{0,500}?vertrouwelijk/gi,
-    /Dit bericht is vertrouwelijk[\s\S]{0,300}?geadresseerde/gi,
+    /Dit bericht (is vertrouwelijk|bevat vertrouwelijke informatie)[\s\S]{0,400}?(geadresseerde|bestemd voor)/gi,
     /Aan dit e-?mail[\s\S]{0,200}?rechten[\s\S]{0,100}?verbonden/gi,
     /Disclaimer:[\s\S]{0,400}?(vertrouwelijk|geadresseerde)/gi
   ];

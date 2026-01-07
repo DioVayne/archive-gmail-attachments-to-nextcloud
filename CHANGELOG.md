@@ -2,6 +2,34 @@
 
 All notable changes to the Gmail Attachment Archiver project are documented in this file.
 
+## [v4.9.6] - 2026-01-07 - Digest Improvements
+
+### 🐛 FIXED: Footer Stripping Pattern
+
+**Problem**: Dutch email footers with variant text "Dit bericht bevat vertrouwelijke informatie..." were not being removed, only "Dit bericht is vertrouwelijk..." was matched.
+
+**Example**: The footer "Dit bericht bevat vertrouwelijke informatie en is uitsluitend bestemd voor geadresseerde(n)..." remained visible in digests.
+
+**Fix**: Updated regex pattern to catch both variants:
+- "Dit bericht is vertrouwelijk..."
+- "Dit bericht bevat vertrouwelijke informatie..."
+
+**Location**: `code.gs:951` - Dutch disclaimer patterns in `stripEmailFooters_()`
+
+### 🐛 FIXED: Emoji Rendering in Gmail
+
+**Problem**: Paperclip emoji (📎) in digest header rendered as question marks in boxes (□□□□□□) in Gmail web interface.
+
+**Cause**: Gmail HTML emails don't reliably support Unicode emoji characters.
+
+**Fix**: Removed emoji from header - now displays clean "Archived Attachments" text.
+
+**Location**: `code.gs:526` - Digest HTML header
+
+**Impact**: Digest headers now render correctly across all Gmail clients without visual artifacts.
+
+---
+
 ## [v4.9.5] - 2026-01-07 - Critical Bug Fixes (Gemini Code Review)
 
 ### 🚨 CRITICAL FIX: CacheService Limit Bug
