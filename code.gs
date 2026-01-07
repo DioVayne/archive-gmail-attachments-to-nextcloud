@@ -60,7 +60,8 @@ function classifyError_(e) {
       msg.includes('share failed') ||
       msg.includes('Email Body Size') ||
       msg.includes('Argument too large: subject') ||
-      msg.includes('Cannot read properties of null')) {
+      msg.includes('Cannot read properties of null') ||
+      msg.includes('EXCESSIVE DATA LOSS')) {
     return 'PERMANENT';
   }
 

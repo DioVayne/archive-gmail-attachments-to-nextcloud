@@ -2,6 +2,37 @@
 
 All notable changes to the Gmail Attachment Archiver project are documented in this file.
 
+## [v4.9.7] - 2026-01-07 - Error Classification Fix
+
+### 🐛 FIXED: EXCESSIVE DATA LOSS Error Infinite Retry Loop
+
+**Problem**: When a thread triggered the EXCESSIVE DATA LOSS protection (>50% data loss), the error was classified as "TRANSIENT", causing the script to:
+1. Remove the processing label
+2. Retry the same thread on next run
+3. Hit the same error again
+4. Loop forever
+
+**Example Log**:
+```
+ERROR: EXCESSIVE DATA LOSS: 53% of content would be truncated (219525 / 415164 chars)
+Temporary/Unknown error. Resetting thread (removing processing label).
+```
+
+**Root Cause**: `classifyError_()` function didn't recognize "EXCESSIVE DATA LOSS" as a permanent error.
+
+**Fix**: Added `msg.includes('EXCESSIVE DATA LOSS')` to the PERMANENT error classification in `classifyError_()`.
+
+**Result**: Threads with excessive data loss are now:
+- Labeled with `Processed-Error` (permanent)
+- Skipped on future runs (no infinite retry)
+- User can manually fix by increasing MAX_BODY_CHARS or cleaning up thread
+
+**Location**: `code.gs:64` - Error classification in `classifyError_()`
+
+**Impact**: Prevents script from wasting execution time retrying impossible threads.
+
+---
+
 ## [v4.9.6] - 2026-01-07 - Digest Improvements
 
 ### 🐛 FIXED: Footer Stripping Pattern
