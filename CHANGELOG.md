@@ -2,6 +2,52 @@
 
 All notable changes to the Gmail Attachment Archiver project are documented in this file.
 
+## [v4.9.5] - 2026-01-07 - Critical Bug Fixes (Gemini Code Review)
+
+### 🚨 CRITICAL FIX: CacheService Limit Bug
+
+**Problem**: Script used 24-hour cache (86400 seconds) for deduplication, but Google Apps Script CacheService has a **hard limit of 6 hours (21600 seconds)**. Using values > 21600 causes `Invalid Argument` exceptions and script crashes.
+
+**Impact**: Cross-thread deduplication was broken - likely causing exceptions during cache writes.
+
+**Fix**: Changed cache expiration from 86400 → 21600 seconds (6 hours max).
+
+**Location**: `code.gs:495` - `globalCache.put()` call
+
+**Credit**: Discovered by Gemini code review
+
+### ✨ IMPROVED: Human-Readable Date Formatting
+
+**Problem**: Dates in digests displayed as ugly technical strings:
+```
+Wed Nov 12 2025 14:30:00 GMT+0100 (Central European Standard Time)
+```
+
+**Fix**: Added `humanDate_()` helper function using `Utilities.formatDate()`:
+```
+12-11-2025 14:30
+```
+
+**Format**: DD-MM-YYYY HH:MM (clean, no timezone clutter)
+
+**Impact**: Much cleaner and more professional digest appearance.
+
+**Changes**:
+- Added `humanDate_()` function at `code.gs:836`
+- Replaced `String(info.date)` with `humanDate_(info.date)` in both HTML and text digests
+- Uses script timezone via `Session.getScriptTimeZone()`
+- Fallback to `String(date)` if formatting fails
+
+### 📝 Documentation Updates
+
+**Updated**: CHANGELOG.md deduplication description from "24-hour" to "6-hour retention (CacheService limit)"
+
+**Note**: Points 3 and 4 from Gemini review were not applicable:
+- Point 3 (Drive API): Code uses DriveApp only, not advanced Drive.Files API
+- Point 4 (Thread.refresh()): Not needed due to label exclusion logic
+
+---
+
 ## [v4.9.4] - 2026-01-07 - Beautiful Digests & Footer Stripping
 
 ### ✨ NEW: Modern Digest Styling
@@ -247,7 +293,7 @@ This release adds 9 powerful enhancement features that dramatically improve usab
 - **Added**: Global file deduplication across all threads using CacheService
 - **How it works**: Uses SHA256 hash to detect files already uploaded in other threads
 - **Benefit**: Prevents re-uploading the same file multiple times, saving time and storage
-- **Cache**: 24-hour retention (files uploaded today won't be re-uploaded)
+- **Cache**: 6-hour retention (CacheService limit, prevents re-uploads within same batch session)
 - **Config**: `ENABLE_GLOBAL_DEDUPLICATION: true` (default: enabled)
 - **Metrics**: Tracks duplicates skipped via `duplicates_skipped` metric
 - **Location**: `code.gs:361-378`

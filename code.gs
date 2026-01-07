@@ -492,7 +492,7 @@ function processThreadAndCreateNewDigest_(thread, me, storage) {
           threadId: thread.getId(),
           link: linkToShow,
           uploadedAt: Date.now()
-        }), 86400); // 24 hour cache
+        }), 21600); // 6 hour cache (max limit for CacheService)
       }
     }
 
@@ -575,7 +575,7 @@ function processThreadAndCreateNewDigest_(thread, me, storage) {
         <div style="background:#f8f9fa; padding:12px 16px; border-bottom:1px solid #dadce0;">
           <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
             <span style="font-weight:600; color:#202124; font-size:16px;">Message ${idx + 1}</span>
-            <span style="color:#5f6368; font-size:12px;">${escapeHtml_(String(info.date))}</span>
+            <span style="color:#5f6368; font-size:12px;">${humanDate_(info.date)}</span>
           </div>
           <div style="font-size:13px; color:#5f6368; line-height:1.6;">
             <div><strong style="color:#202124;">From:</strong> ${escapeHtml_(info.from)}</div>
@@ -599,7 +599,7 @@ function processThreadAndCreateNewDigest_(thread, me, storage) {
       `From: ${info.from}\n` +
       `To: ${info.to}\n` +
       (info.cc ? `CC: ${info.cc}\n` : '') +
-      `Date: ${String(info.date)}\n` +
+      `Date: ${humanDate_(info.date)}\n` +
       `Subject: ${info.subject}\n` +
       `Original Thread Labels: ${labels}\n\n` +
       `${textContent}\n\n`
@@ -825,6 +825,23 @@ function humanSize_(n) {
   let i = 0, v = n;
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
   return v.toFixed(v >= 10 || i === 0 ? 0 : 1) + ' ' + units[i];
+}
+
+/**
+ * Formats a Date object into a human-readable string.
+ * @param {Date} date The date object.
+ * @returns {string} Formatted date string (e.g., "07-01-2026 14:30").
+ * @private
+ */
+function humanDate_(date) {
+  if (!date) return '';
+  try {
+    // Format: DD-MM-YYYY HH:MM (user-friendly, no timezone clutter)
+    return Utilities.formatDate(date, Session.getScriptTimeZone(), 'dd-MM-yyyy HH:mm');
+  } catch (e) {
+    // Fallback if formatDate fails
+    return String(date);
+  }
 }
 
 /**
