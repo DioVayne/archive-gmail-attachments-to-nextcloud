@@ -531,6 +531,7 @@ function processThreadAndCreateNewDigest_(thread, me, storage) {
 
   // Loop through the *stored info* and build digest
   let totalTruncatedChars = 0; // Track truncation for logging
+  let totalOriginalChars = 0;  // Track original size for percentage calculation
 
   messagesToDigest.forEach((info, idx) => {
     const labels = threadLabels.join(', ');
@@ -538,6 +539,9 @@ function processThreadAndCreateNewDigest_(thread, me, storage) {
     // Remove base64 images FIRST, then truncate
     let htmlContent = info.htmlBody || escapeHtml_(info.plainBody);
     htmlContent = removeBase64Images_(htmlContent); // Remove inline images
+
+    // Track original size for data loss percentage
+    totalOriginalChars += htmlContent.length;
 
     if (htmlContent.length > MAX_BODY_CHARS) {
       const truncated = htmlContent.length - MAX_BODY_CHARS;
@@ -581,9 +585,27 @@ function processThreadAndCreateNewDigest_(thread, me, storage) {
     );
   });
 
-  // Log truncation metrics if significant content was removed
-  if (totalTruncatedChars > 0) {
-    Logger.log('   -> WARNING: Truncated %s total characters from %s messages', totalTruncatedChars, messagesToDigest.length);
+  // Check if truncation is acceptable (safety check for data loss)
+  if (totalTruncatedChars > 0 && totalOriginalChars > 0) {
+    const dataLossPercentage = Math.round((totalTruncatedChars / totalOriginalChars) * 100);
+    Logger.log('   -> WARNING: Truncated %s characters from %s messages (%s%% data loss)',
+      totalTruncatedChars, messagesToDigest.length, dataLossPercentage);
+
+    // SAFETY: If losing more than 50% of content, refuse to process thread
+    if (dataLossPercentage > 50) {
+      const errorMsg = `EXCESSIVE DATA LOSS: ${dataLossPercentage}% of content would be truncated (${totalTruncatedChars} / ${totalOriginalChars} chars). ` +
+        `Thread has extremely long messages. Options: ` +
+        `(1) Increase MAX_BODY_CHARS in Config.gs (current: ${MAX_BODY_CHARS}), ` +
+        `(2) Manually archive this thread, or ` +
+        `(3) Delete large forwarded content before archiving.`;
+      Logger.log('   -> ERROR: %s', errorMsg);
+      throw new Error(errorMsg);
+    }
+
+    // Warn if losing 25-50% of content (concerning but not fatal)
+    if (dataLossPercentage >= 25) {
+      Logger.log('   -> ⚠️  SIGNIFICANT DATA LOSS: Consider increasing MAX_BODY_CHARS in Config.gs (current: %s)', MAX_BODY_CHARS);
+    }
   }
 
   const finalHtmlBody = htmlBodyParts.join('');

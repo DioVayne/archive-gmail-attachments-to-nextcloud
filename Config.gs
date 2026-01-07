@@ -83,7 +83,9 @@ const PROCESSING_HOURS = null;               // Time window: { START: 2, END: 6 
  * Email Content Settings
  * Control how digest emails are formatted
  */
-const MAX_BODY_CHARS = 10000;                // Max characters per message in digest (prevents Gmail size errors)
+const MAX_BODY_CHARS = 20000;                // Max characters per message in digest (default: 20000)
+                                             // ⚠️ SAFETY: Script refuses to process threads if >50% data loss would occur
+                                             // Increase if you see "EXCESSIVE DATA LOSS" errors in logs
 const MAX_INLINE_IMAGE_BYTES = 50000;        // Remove base64 images larger than this (bytes, default: 50KB)
 const INCLUDE_INLINE_IMAGES = true;          // Extract inline images as attachments (true/false)
 

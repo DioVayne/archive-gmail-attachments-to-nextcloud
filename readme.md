@@ -2,7 +2,7 @@
 
 > **Reclaim Gmail space by automatically archiving large email attachments to Nextcloud or Google Drive**
 
-[![Version](https://img.shields.io/badge/version-4.9.1-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-4.9.2-blue.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Google Apps Script](https://img.shields.io/badge/platform-Google%20Apps%20Script-yellow.svg)](https://script.google.com)
 
@@ -376,18 +376,38 @@ testStorageProvider()
 
 **Solution**: Script automatically waits 15 minutes and retries.
 
+### Error: "EXCESSIVE DATA LOSS" (v4.9.2+)
+
+**Cause**: Thread contains extremely long messages that would lose >50% of content after truncation.
+
+**Example Log**:
+```
+ERROR: EXCESSIVE DATA LOSS: 64% of content would be truncated (307905 / 480000 chars)
+```
+
+**What Happens**: Script REFUSES to process the thread (data loss prevention). Thread is marked with "Processed-Error" label and stays in your mailbox.
+
+**Solutions** (pick one):
+
+1. **Increase limit** (recommended):
+```javascript
+// In Config.gs:
+MAX_BODY_CHARS: 30000,  // Increase from default 20000
+```
+
+2. **Manual handling**: Open the thread, delete unnecessary forwarded content (quotes, signatures), then remove the error label to retry.
+
+3. **Skip thread**: If content isn't important, manually delete or archive the thread.
+
+**Safety**: This protection prevents permanent data loss. Better to get an error than lose 64% of your email content!
+
 ### Error: "Email Body Size" or "Argument too large"
 
-**Cause**: Thread has extremely long messages (e.g., 10,000-line HTML forwards).
+**Cause**: Digest email is too large to send (>25MB after processing).
 
-**Solution**: Script automatically:
-- Removes large base64 images
-- Truncates messages longer than `MAX_BODY_CHARS`
-- If still too large, thread is marked as error
-
-Adjust in Config.gs:
+**Solution**: Lower `MAX_BODY_CHARS` in Config.gs:
 ```javascript
-MAX_BODY_CHARS: 5000,  // Lower if you keep hitting limits
+MAX_BODY_CHARS: 15000,  // Lower if digest is still too large
 ```
 
 ### Threads Stuck in "Processing-Attachment"

@@ -2,6 +2,47 @@
 
 All notable changes to the Gmail Attachment Archiver project are documented in this file.
 
+## [v4.9.2] - 2026-01-07 - Critical Data Loss Protection
+
+### 🚨 CRITICAL FIX: Data Loss Prevention
+
+#### Problem Identified
+- Script was silently truncating excessive content (>50% data loss)
+- Example: 307,905 characters removed from 11 messages = 64% content loss per message
+- Original threads moved to trash with incomplete digest = **permanent data loss after 30 days**
+- Only a WARNING in logs, no prevention mechanism
+
+#### New Safety Mechanism
+- **ADDED**: Automatic data loss percentage calculation
+- **ADDED**: Hard limit at 50% data loss - script REFUSES to process thread
+- **ADDED**: Warning at 25-50% data loss (concerning but allowed)
+- **IMPROVED**: Logs now show: `WARNING: Truncated X characters from Y messages (Z% data loss)`
+
+**Error Example:**
+```
+ERROR: EXCESSIVE DATA LOSS: 64% of content would be truncated (307905 / 480000 chars)
+Thread has extremely long messages.
+Options:
+(1) Increase MAX_BODY_CHARS in Config.gs (current: 10000)
+(2) Manually archive this thread
+(3) Delete large forwarded content before archiving
+```
+
+#### Configuration Changes
+- **Changed**: `MAX_BODY_CHARS` default increased from 10,000 → 20,000 characters
+- **Added**: Safety warning in Config.gs about 50% data loss limit
+- **Rationale**: Better default prevents most truncation issues
+
+#### User Impact
+- ✅ **Safer**: Threads with extreme truncation are NOT processed (marked as error)
+- ✅ **Visibility**: Clear percentage-based logging shows data loss impact
+- ✅ **Actionable**: Error message provides 3 clear solutions
+- ✅ **Recoverable**: Problematic threads stay in original location (not trashed)
+
+**RECOMMENDATION**: If you see "EXCESSIVE DATA LOSS" errors, increase MAX_BODY_CHARS to 30000-50000.
+
+---
+
 ## [v4.9.1] - 2026-01-07 - Code Quality & Clarity Release
 
 ### 🧹 Simplifications & Improvements
