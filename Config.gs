@@ -91,6 +91,8 @@ const INCLUDE_INLINE_IMAGES = true;          // Extract inline images as attachm
 const STRIP_QUOTED_CONTENT = false;          // Remove quoted/forwarded content ("> Original message", etc.)
                                              // ⚠️ EXPERIMENTAL: May reduce digest size but could remove important context
                                              // Set to true only if threads have excessive quote nesting
+const STRIP_EMAIL_FOOTERS = true;            // Remove email disclaimers/footers ("De informatie verzonden...", etc.)
+                                             // Safe to enable - only removes common boilerplate text
 
 /**
  * Label Names
@@ -127,6 +129,7 @@ const USER_CONFIG_GENERAL = {
   MAX_INLINE_IMAGE_BYTES,
   INCLUDE_INLINE_IMAGES,
   STRIP_QUOTED_CONTENT,
+  STRIP_EMAIL_FOOTERS,
   DIGEST_SUBJECT_PREFIX,
   PROCESSED_LABEL,
   PROCESSING_LABEL,

@@ -2,6 +2,106 @@
 
 All notable changes to the Gmail Attachment Archiver project are documented in this file.
 
+## [v4.9.4] - 2026-01-07 - Beautiful Digests & Footer Stripping
+
+### ✨ NEW: Modern Digest Styling
+
+Completely redesigned digest email appearance for better readability and professionalism.
+
+#### Visual Improvements
+- **Gradient Header**: Beautiful purple gradient for attachment section (📎 Archived Attachments)
+- **Card-Based Layout**: Clean white cards with subtle shadows for each message
+- **Modern Color Palette**: Google Material Design colors (#1a73e8 for links, #f8f9fa backgrounds)
+- **Better Typography**: Improved font hierarchy, line heights, and spacing
+- **Responsive Design**: Max-width container, proper padding and margins
+- **Attachment List**: Styled file links with size indicators and blue accent borders
+
+#### Before vs After
+**Before**: Plain text styling, basic borders, no visual hierarchy
+**After**: Modern Gmail-inspired design with gradients, cards, and professional styling
+
+**Example**:
+```
+[Purple Gradient Header]
+📎 Archived Attachments
+3 file(s) uploaded to cloud storage
+
+[Styled File List with borders]
+📄 document.pdf (2.5 MB)
+📄 image.png (450 KB)
+
+[Clean Message Cards]
+Message 1
+From: sender@example.com
+To: you@example.com
+Date: 2026-01-07
+
+[Message content in card with proper spacing]
+```
+
+### ✨ NEW: Email Footer Stripping
+
+Automatically removes legal disclaimers and boilerplate text that wastes space.
+
+#### What Gets Removed
+**Dutch Disclaimers** (common in NL business emails):
+- "De informatie verzonden in dit e-mail..."
+- "Dit bericht is vertrouwelijk..."
+- "Aan dit e-mail kunnen geen rechten..."
+
+**English Disclaimers**:
+- "This email is confidential and intended..."
+- "CONFIDENTIAL - If you are not the intended recipient..."
+- "The information contained in this message..."
+
+**Signature Blocks**:
+- Email signature separators (-- or ___)
+- Footer markers in DIVs/tables
+
+#### Configuration
+```javascript
+// In Config.gs (default: enabled):
+STRIP_EMAIL_FOOTERS: true  // Safe to enable - only removes boilerplate
+```
+
+**Logging Example**:
+```
+-> Footer stripping: Removed 1250 characters (18% reduction)
+```
+
+#### Why This Helps
+- Legal disclaimers often 500-2000 characters per email
+- Thread with 10 messages = 5,000-20,000 chars of pure boilerplate
+- Combined with other stripping = significantly smaller digests
+- No loss of actual content - only removes legal fluff
+
+### 📝 Technical Details
+
+**New Functions**:
+- `stripEmailFooters_()`: Pattern matching for 10+ common disclaimer types
+- Enhanced digest HTML generation with modern CSS
+
+**Patterns Matched**:
+- 4 Dutch disclaimer patterns
+- 5 English disclaimer patterns
+- 3 footer marker patterns (DIVs, paragraphs, HR sections)
+- Signature separator detection
+
+**Safety**:
+- Conservative matching (only removes clear legal text)
+- Replaces with subtle placeholder: `[Legal disclaimer removed]`
+- Logs reduction percentage when significant (>500 chars)
+
+### 🎨 Design Philosophy
+
+The new digest design follows these principles:
+- **Scannable**: Clear visual hierarchy makes it easy to find information
+- **Professional**: Looks like a well-designed email, not a script output
+- **Compact**: Better use of space without cluttering
+- **Accessible**: Good contrast ratios, readable font sizes
+
+---
+
 ## [v4.9.3] - 2026-01-07 - Quote Stripping & Rollback Improvements
 
 ### ✨ New Feature: Quote Stripping (EXPERIMENTAL)

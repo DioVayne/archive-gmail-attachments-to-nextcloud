@@ -513,15 +513,26 @@ function processThreadAndCreateNewDigest_(thread, me, storage) {
 
   const MAX_BODY_CHARS = CONFIG.MAX_BODY_CHARS; // Use configurable limit
 
-  // Add the file links at the top
+  // Add modern styling and attachment links at the top
   const linkHtml = allUploaded.map(u =>
-    `<li><a href="${u.link}">${escapeHtml_(u.name)}</a> (${humanSize_(u.size)})</li>`
+    `<li style="margin:8px 0; padding:10px; background:#f8f9fa; border-left:4px solid #4285f4; border-radius:4px;">
+      <a href="${u.link}" style="color:#1a73e8; text-decoration:none; font-weight:500;">${escapeHtml_(u.name)}</a>
+      <span style="color:#5f6368; margin-left:8px;">(${humanSize_(u.size)})</span>
+    </li>`
   ).join('');
   htmlBodyParts.push(`
-    <p><strong>Uploaded attachments (${allUploaded.length} files):</strong></p>
-    <ul>${linkHtml}</ul>
-    <hr>
-    <p><strong>Original thread content below:</strong></p>
+    <div style="font-family:Arial,sans-serif; max-width:800px; margin:0 auto; padding:20px; background:#ffffff;">
+      <div style="background:linear-gradient(135deg, #667eea 0%, #764ba2 100%); color:white; padding:20px; border-radius:8px; margin-bottom:20px;">
+        <h2 style="margin:0; font-size:24px;">📎 Archived Attachments</h2>
+        <p style="margin:8px 0 0 0; opacity:0.9; font-size:14px;">${allUploaded.length} file(s) uploaded to cloud storage</p>
+      </div>
+      <div style="background:#f1f3f4; padding:15px; border-radius:8px; margin-bottom:20px;">
+        <ul style="list-style:none; padding:0; margin:0;">${linkHtml}</ul>
+      </div>
+      <div style="border-top:2px solid #e8eaed; padding-top:20px;">
+        <h3 style="color:#5f6368; font-size:14px; text-transform:uppercase; letter-spacing:1px; margin:0 0 15px 0;">Original Thread Content</h3>
+      </div>
+    </div>
   `);
 
   const linkText = allUploaded.map(u =>
@@ -536,10 +547,11 @@ function processThreadAndCreateNewDigest_(thread, me, storage) {
   messagesToDigest.forEach((info, idx) => {
     const labels = threadLabels.join(', ');
 
-    // Clean content: remove base64 images, then quoted content (if enabled)
+    // Clean content: remove base64 images, quoted content, and footers (if enabled)
     let htmlContent = info.htmlBody || escapeHtml_(info.plainBody);
-    htmlContent = removeBase64Images_(htmlContent);  // Remove inline images
-    htmlContent = stripQuotedContent_(htmlContent);  // Remove quoted/forwarded content (if enabled)
+    htmlContent = removeBase64Images_(htmlContent);   // Remove inline images
+    htmlContent = stripQuotedContent_(htmlContent);   // Remove quoted/forwarded content (if enabled)
+    htmlContent = stripEmailFooters_(htmlContent);    // Remove email footers/disclaimers (if enabled)
 
     // Track original size for data loss percentage
     totalOriginalChars += htmlContent.length;
@@ -559,18 +571,26 @@ function processThreadAndCreateNewDigest_(thread, me, storage) {
     }
 
     htmlBodyParts.push(`
-      <div style="border:1px solid #ccc;padding:10px;margin-bottom:10px;border-radius:8px;">
-        <p><strong>Message ${idx + 1}</strong><br>
-        <strong>From:</strong> ${escapeHtml_(info.from)}<br>
-        <strong>To:</strong> ${escapeHtml_(info.to)}<br>
-        ${info.cc ? `<strong>CC:</strong> ${escapeHtml_(info.cc)}<br>` : ''}
-        <strong>Date:</strong> ${escapeHtml_(String(info.date))}<br>
-        <strong>Subject:</strong> ${escapeHtml_(info.subject)}<br>
-        <strong>Original Thread Labels:</strong> ${escapeHtml_(labels)}</p>
-        <hr>
-        <blockquote style="border-left:3px solid #eee;padding-left:12px;margin-left:5px;">
+      <div style="border:1px solid #dadce0; border-radius:8px; margin-bottom:20px; overflow:hidden; background:#fff;">
+        <div style="background:#f8f9fa; padding:12px 16px; border-bottom:1px solid #dadce0;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+            <span style="font-weight:600; color:#202124; font-size:16px;">Message ${idx + 1}</span>
+            <span style="color:#5f6368; font-size:12px;">${escapeHtml_(String(info.date))}</span>
+          </div>
+          <div style="font-size:13px; color:#5f6368; line-height:1.6;">
+            <div><strong style="color:#202124;">From:</strong> ${escapeHtml_(info.from)}</div>
+            <div><strong style="color:#202124;">To:</strong> ${escapeHtml_(info.to)}</div>
+            ${info.cc ? `<div><strong style="color:#202124;">CC:</strong> ${escapeHtml_(info.cc)}</div>` : ''}
+            ${info.subject ? `<div style="margin-top:8px; padding-top:8px; border-top:1px solid #e8eaed;"><strong style="color:#202124;">Subject:</strong> ${escapeHtml_(info.subject)}</div>` : ''}
+          </div>
+        </div>
+        <div style="padding:16px; color:#202124; font-size:14px; line-height:1.6;">
           ${htmlContent}
-        </blockquote>
+        </div>
+        ${labels ? `<div style="padding:12px 16px; border-top:1px solid #e8eaed; background:#f8f9fa;">
+          <span style="font-size:11px; color:#5f6368; text-transform:uppercase; letter-spacing:0.5px;">Labels:</span>
+          <span style="font-size:12px; color:#1a73e8; margin-left:8px;">${escapeHtml_(labels)}</span>
+        </div>` : ''}
       </div>
     `);
 
@@ -889,6 +909,60 @@ function stripQuotedContent_(html) {
   const removedChars = originalLength - cleaned.length;
   if (removedChars > 1000) {
     Logger.log('   -> Quote stripping: Removed %s characters (%s%% reduction)',
+      removedChars, Math.round((removedChars / originalLength) * 100));
+  }
+
+  return cleaned;
+}
+
+/**
+ * Removes email footers/disclaimers (boilerplate text that adds no value).
+ * Targets common patterns: confidentiality notices, legal disclaimers, signature blocks.
+ * @param {string} html The HTML content.
+ * @returns {string} HTML with footers removed.
+ * @private
+ */
+function stripEmailFooters_(html) {
+  if (!html || !CONFIG.STRIP_EMAIL_FOOTERS) return html;
+
+  const originalLength = html.length;
+  let cleaned = html;
+
+  // Dutch disclaimers (very common in NL business emails)
+  const dutchPatterns = [
+    /De informatie verzonden in dit e-?mail[\s\S]{0,500}?vertrouwelijk/gi,
+    /Dit bericht is vertrouwelijk[\s\S]{0,300}?geadresseerde/gi,
+    /Aan dit e-?mail[\s\S]{0,200}?rechten[\s\S]{0,100}?verbonden/gi,
+    /Disclaimer:[\s\S]{0,400}?(vertrouwelijk|geadresseerde)/gi
+  ];
+
+  // English disclaimers
+  const englishPatterns = [
+    /This email is confidential[\s\S]{0,500}?(intended recipient|unauthorized)/gi,
+    /CONFIDENTIAL[\s\S]{0,300}?intended recipient/gi,
+    /This message contains confidential[\s\S]{0,400}?recipient/gi,
+    /If you are not the intended recipient[\s\S]{0,300}?(delete|destroy)/gi,
+    /The information contained in this[\s\S]{0,400}?(confidential|privileged)/gi
+  ];
+
+  // Common footer markers (often in DIVs/tables at bottom)
+  const footerMarkers = [
+    /<div[^>]*>(Disclaimer|DISCLAIMER|Legal Notice)[\s\S]{0,600}?<\/div>/gi,
+    /<p[^>]*>(Disclaimer|DISCLAIMER|Legal Notice)[\s\S]{0,600}?<\/p>/gi,
+    /<hr[^>]*>[\s]*<(p|div)[^>]*>(Disclaimer|DISCLAIMER)[\s\S]{0,600}?<\/(p|div)>/gi
+  ];
+
+  // Email signature separators (-- or ___)
+  cleaned = cleaned.replace(/(<br\s*\/?>\s*){2,}[-_]{2,}[\s\S]{0,400}$/gi, '<br><br><em>[Signature removed]</em>');
+
+  // Apply all patterns
+  [...dutchPatterns, ...englishPatterns, ...footerMarkers].forEach(pattern => {
+    cleaned = cleaned.replace(pattern, '<div style="color:#999; font-size:0.85em; font-style:italic;">[Legal disclaimer removed]</div>');
+  });
+
+  const removedChars = originalLength - cleaned.length;
+  if (removedChars > 500) {
+    Logger.log('   -> Footer stripping: Removed %s characters (%s%% reduction)',
       removedChars, Math.round((removedChars / originalLength) * 100));
   }
 
