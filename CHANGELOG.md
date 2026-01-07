@@ -2,6 +2,67 @@
 
 All notable changes to the Gmail Attachment Archiver project are documented in this file.
 
+## [v4.9.3] - 2026-01-07 - Quote Stripping & Rollback Improvements
+
+### ✨ New Feature: Quote Stripping (EXPERIMENTAL)
+
+Optionally remove quoted/forwarded content to dramatically reduce digest size.
+
+#### What It Does
+- Removes Gmail blockquotes (`<blockquote class="gmail_quote">`)
+- Removes forwarded message headers (`---------- Forwarded message ---------`)
+- Removes "On [date], [person] wrote:" patterns
+- Logs reduction percentage when >1000 chars removed
+
+#### Safety Mechanisms
+- **Default: OFF** (`STRIP_QUOTED_CONTENT: false` in Config.gs)
+- Only removes content with clear quote markers
+- Conservative: Only removes generic blockquotes if 3+ levels deep
+- Replaces removed content with placeholder text
+
+#### Configuration
+```javascript
+// In Config.gs:
+STRIP_QUOTED_CONTENT: true  // Enable if threads have excessive quote nesting
+```
+
+**Use Case**: Email threads with 10+ levels of forwarding/quotes that cause "EXCESSIVE DATA LOSS" errors.
+
+**Example Reduction**: Thread with 80KB of nested quotes → 20KB after stripping → Fits within limits without data loss.
+
+### 🚨 CRITICAL FIX: Emergency Rollback Now Deletes Digests
+
+#### Problem Fixed
+- `emergencyRollback()` restored threads from trash but left digest emails
+- Next script run would re-process threads → create NEW digests → DUPLICATES
+- Users had to manually find and delete old digests
+
+#### New Behavior
+- **Step 1**: Restore threads from trash (as before)
+- **Step 2**: Automatically find and delete matching digest emails
+- **Step 3**: Log summary with counts
+
+**Matching Logic**: Fuzzy match on subject (handles truncated subjects)
+
+**Example Output**:
+```
+=== ROLLBACK COMPLETE ===
+✅ Restored 15 threads to inbox
+🗑️  Deleted 15 digest emails
+```
+
+#### Safety
+- Only deletes digests that match restored thread subjects
+- Warns if not all digests were matched/deleted
+- Files in cloud storage remain (manual cleanup if desired)
+
+### 📝 Documentation Updates
+- Added quote stripping configuration to Config.gs
+- Updated emergencyRollback() documentation with new behavior
+- Added warnings about experimental nature of quote stripping
+
+---
+
 ## [v4.9.2] - 2026-01-07 - Critical Data Loss Protection
 
 ### 🚨 CRITICAL FIX: Data Loss Prevention

@@ -88,6 +88,9 @@ const MAX_BODY_CHARS = 20000;                // Max characters per message in di
                                              // Increase if you see "EXCESSIVE DATA LOSS" errors in logs
 const MAX_INLINE_IMAGE_BYTES = 50000;        // Remove base64 images larger than this (bytes, default: 50KB)
 const INCLUDE_INLINE_IMAGES = true;          // Extract inline images as attachments (true/false)
+const STRIP_QUOTED_CONTENT = false;          // Remove quoted/forwarded content ("> Original message", etc.)
+                                             // ⚠️ EXPERIMENTAL: May reduce digest size but could remove important context
+                                             // Set to true only if threads have excessive quote nesting
 
 /**
  * Label Names
@@ -123,6 +126,7 @@ const USER_CONFIG_GENERAL = {
   MAX_BODY_CHARS,
   MAX_INLINE_IMAGE_BYTES,
   INCLUDE_INLINE_IMAGES,
+  STRIP_QUOTED_CONTENT,
   DIGEST_SUBJECT_PREFIX,
   PROCESSED_LABEL,
   PROCESSING_LABEL,

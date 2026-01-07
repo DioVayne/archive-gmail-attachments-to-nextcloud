@@ -2,7 +2,7 @@
 
 > **Reclaim Gmail space by automatically archiving large email attachments to Nextcloud or Google Drive**
 
-[![Version](https://img.shields.io/badge/version-4.9.2-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-4.9.3-blue.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Google Apps Script](https://img.shields.io/badge/platform-Google%20Apps%20Script-yellow.svg)](https://script.google.com)
 

@@ -536,9 +536,10 @@ function processThreadAndCreateNewDigest_(thread, me, storage) {
   messagesToDigest.forEach((info, idx) => {
     const labels = threadLabels.join(', ');
 
-    // Remove base64 images FIRST, then truncate
+    // Clean content: remove base64 images, then quoted content (if enabled)
     let htmlContent = info.htmlBody || escapeHtml_(info.plainBody);
-    htmlContent = removeBase64Images_(htmlContent); // Remove inline images
+    htmlContent = removeBase64Images_(htmlContent);  // Remove inline images
+    htmlContent = stripQuotedContent_(htmlContent);  // Remove quoted/forwarded content (if enabled)
 
     // Track original size for data loss percentage
     totalOriginalChars += htmlContent.length;
@@ -852,6 +853,46 @@ function removeBase64Images_(html) {
     // Keep small images
     return match;
   });
+}
+
+/**
+ * Removes quoted/forwarded content from HTML to reduce digest size.
+ * SAFETY: Only removes content with clear quote markers (Gmail blockquotes, "> " prefixes).
+ * @param {string} html The HTML content.
+ * @returns {string} HTML with quoted content removed.
+ * @private
+ */
+function stripQuotedContent_(html) {
+  if (!html || !CONFIG.STRIP_QUOTED_CONTENT) return html;
+
+  const originalLength = html.length;
+  let cleaned = html;
+
+  // Remove Gmail blockquotes (class="gmail_quote")
+  cleaned = cleaned.replace(/<blockquote[^>]*class=["'][^"']*gmail_quote[^"']*["'][^>]*>[\s\S]*?<\/blockquote>/gi,
+    '<div style="color:#888; font-style:italic; padding:10px; border-left:3px solid #ddd;">[Quoted content removed to reduce size]</div>');
+
+  // Remove generic blockquotes (but be conservative - only if multiple levels)
+  const blockquoteCount = (cleaned.match(/<blockquote/gi) || []).length;
+  if (blockquoteCount > 2) {
+    cleaned = cleaned.replace(/<blockquote[^>]*>[\s\S]*?<\/blockquote>/gi,
+      '<div style="color:#888; font-style:italic; padding:10px; border-left:3px solid #ddd;">[Quoted content removed]</div>');
+  }
+
+  // Remove forwarded message headers (common patterns)
+  cleaned = cleaned.replace(/[-]{5,}\s*Forwarded message\s*[-]{5,}[\s\S]{0,500}?Subject:[\s\S]{0,200}/gi,
+    '<div style="color:#888; font-style:italic;">[Forwarded message header removed]</div>');
+
+  // Remove "On [date], [person] wrote:" patterns
+  cleaned = cleaned.replace(/On\s+.{10,80}wrote:/gi, '<em>[Quote header removed]</em>');
+
+  const removedChars = originalLength - cleaned.length;
+  if (removedChars > 1000) {
+    Logger.log('   -> Quote stripping: Removed %s characters (%s%% reduction)',
+      removedChars, Math.round((removedChars / originalLength) * 100));
+  }
+
+  return cleaned;
 }
 
 // ===================================================================================
@@ -1356,14 +1397,20 @@ function validateConfiguration() {
 // ===================================================================================
 
 /**
- * Emergency rollback: restores last batch of threads from trash.
+ * CRITICAL - Emergency rollback with automatic digest cleanup.
+ *
+ * Restores processed threads from trash AND deletes corresponding digest emails.
+ * This prevents duplicates when threads are re-processed after rollback.
+ *
  * ONLY works if threads are still in trash (< 30 days).
- * WARNING: Does NOT remove digest emails or uploaded files.
+ * WARNING: Does NOT remove uploaded files from cloud storage.
  */
 function emergencyRollback() {
   Logger.log('=== EMERGENCY ROLLBACK START ===');
-  Logger.log('⚠️  WARNING: This will restore processed threads from trash.');
-  Logger.log('Digest emails and uploaded files will NOT be removed.');
+  Logger.log('⚠️  This will:');
+  Logger.log('   1. Restore processed threads from trash');
+  Logger.log('   2. Delete corresponding digest emails (prevents duplicates)');
+  Logger.log('   3. Keep uploaded files in cloud storage (manual cleanup required)');
   Logger.log('');
 
   const processedLabel = GmailApp.getUserLabelByName(CONFIG.PROCESSED_LABEL);
@@ -1372,9 +1419,10 @@ function emergencyRollback() {
     return;
   }
 
-  // Find threads in trash with Processed-Attachments label
+  // STEP 1: Find threads in trash to restore
   const query = `in:trash label:${CONFIG.PROCESSED_LABEL}`;
-  Logger.log('Searching for threads to restore with query: %s', query);
+  Logger.log('Step 1: Searching for threads to restore...');
+  Logger.log('Query: %s', query);
 
   const threads = GmailApp.search(query, 0, 100);
   Logger.log('Found %s threads to restore', threads.length);
@@ -1384,26 +1432,77 @@ function emergencyRollback() {
     return;
   }
 
+  // Store thread subjects for digest matching (before restoration changes them)
+  const restoredSubjects = [];
   let restoredCount = 0;
+
+  Logger.log('');
+  Logger.log('Step 2: Restoring threads from trash...');
   threads.forEach(thread => {
     try {
+      const subject = thread.getFirstMessageSubject();
       thread.moveToInbox();
       thread.removeLabel(processedLabel);
-      Logger.log('✅ Restored: %s', thread.getFirstMessageSubject());
+      Logger.log('✅ Restored: %s', subject);
+      restoredSubjects.push(subject);
       restoredCount++;
     } catch (e) {
       Logger.log('❌ Failed to restore thread %s: %s', thread.getId(), e.message);
     }
   });
 
+  // STEP 2: Find and delete corresponding digest emails
+  Logger.log('');
+  Logger.log('Step 3: Searching for digest emails to delete...');
+  const digestQuery = `subject:"${CONFIG.DIGEST_SUBJECT_PREFIX}" -in:trash`;
+
+  let deletedDigestCount = 0;
+  const digestThreads = GmailApp.search(digestQuery, 0, 200);  // Search more digests than threads
+  Logger.log('Found %s digest emails total (will match with restored threads)', digestThreads.length);
+
+  if (digestThreads.length > 0) {
+    digestThreads.forEach(digestThread => {
+      const digestSubject = digestThread.getFirstMessageSubject();
+
+      // Check if this digest corresponds to any restored thread
+      // Digest subject format: "[ARCHIVED-DIGEST] Original Subject"
+      const originalSubject = digestSubject.replace(CONFIG.DIGEST_SUBJECT_PREFIX, '').trim();
+
+      // Match if original subject is in our restored list (fuzzy match - contains)
+      const isMatch = restoredSubjects.some(restored =>
+        originalSubject.includes(restored) || restored.includes(originalSubject)
+      );
+
+      if (isMatch) {
+        try {
+          digestThread.moveToTrash();
+          Logger.log('🗑️  Deleted digest: %s', digestSubject);
+          deletedDigestCount++;
+        } catch (e) {
+          Logger.log('❌ Failed to delete digest %s: %s', digestThread.getId(), e.message);
+        }
+      }
+    });
+  }
+
+  // SUMMARY
   Logger.log('');
   Logger.log('=== ROLLBACK COMPLETE ===');
-  Logger.log('Restored %s threads to inbox', restoredCount);
+  Logger.log('✅ Restored %s threads to inbox', restoredCount);
+  Logger.log('🗑️  Deleted %s digest emails', deletedDigestCount);
+
+  if (deletedDigestCount < restoredCount) {
+    Logger.log('');
+    Logger.log('⚠️  WARNING: Not all digests were deleted (%s restored, %s deleted)', restoredCount, deletedDigestCount);
+    Logger.log('Some digests may not have matched. Check your archive manually.');
+  }
+
   Logger.log('');
-  Logger.log('⚠️  IMPORTANT NOTES:');
-  Logger.log('• Digest emails are still in your archive');
-  Logger.log('• Files are still in cloud storage');
-  Logger.log('• You may want to manually clean these up');
+  Logger.log('⚠️  IMPORTANT: Files remain in cloud storage. Manual cleanup required if desired.');
+  Logger.log('');
+  Logger.log('Next steps:');
+  Logger.log('• Run script again to re-process restored threads (if desired)');
+  Logger.log('• Or manually handle the restored threads');
 }
 
 // ===================================================================================
